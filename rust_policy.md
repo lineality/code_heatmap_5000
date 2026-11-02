@@ -1,3 +1,14 @@
+#### Rust Policy
+- Mode & Case Handling
+- Guidelines
+- Rules
+
+#### See 
+- https://github.com/lineality/rust_lang_rules
+- https://github.com/lineality/modes_and_case_handling
+- https://github.com/lineality/modes_and_case_handling/blob/main/mode_case_handling_framework_summary.md
+
+
 #### mode_case_handling_framework_summary
 
 
@@ -233,4 +244,3 @@ match fallible_call(input) {
 - https://www.oreilly.com/library/view/designing-data-intensive-applications/9781491903063/
 - https://www.oreilly.com/library/view/rust-atomics-and/9781098119430/
 - Books by https://en.wikipedia.org/wiki/P._J._Plauger
-
