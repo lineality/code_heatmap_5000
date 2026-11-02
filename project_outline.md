@@ -1,16 +1,60 @@
-code_heatmap_5000 Project Outline
-(Draft-name: hot loop 5000)
-2026.11.01st Geoffrey Gordon Ashbrook
+# code_heatmap_5000 Project Outline
+### riparian Liebig-Barrel physical code modeling
+##### 2026.11.01-02 Geoffrey Gordon Ashbrook
+
+
 
 #### Preamble Notes:
 
-- Liebig's barrel: https://en.wikipedia.org/wiki/Liebig%27s_law_of_the_minimum 
+- Liebig's Barrel: https://en.wikipedia.org/wiki/Liebig%27s_law_of_the_minimum 
 
-- Analysis that scales with sanity: for small or large projects
+- Policy: While no third-party dependencies is ideal, there is a good chance that well-tested utilities exist (one would hope!) and can be used or cover all or or some of this sketch of scope. It may be possible to use no 3rd party rust crates (or so up to a point).
 
-- Policy: While no third-party dependencies is ideal, there is a good chance that well-tested utilities exist (one would hope!) and can be used or cover all or or some of this sketch of scope.
+- This is focused on Rust-language. It could be more abstractly (as another separate scope/project, or purely for comparison-planning-design discussion) for odin-lang, zig-lang, c, etc.
 
-- This is focused on Rust. It could be more abstractly (as another separate scope/project, or purely for comparison-planning-design discussion) for odin, zig, c, etc.
+
+#### Analysis that scales with sanity: for small or large projects
+- Tiny-Slim Projects: Tunnels: https://github.com/lineality/tunnels 
+- Medium-Slim Projects: Lines, FF, Uma; 
+https://github.com/lineality/lines_editor, 
+https://github.com/lineality/ff_file_manager_minimal_rust 
+- Variable Size Projects: https://github.com/lineality/granmo_model_nlp_classifier_rust 
+- Larger Projects: https://github.com/pumpkin-mc/pumpkin
+
+
+# Mapping Code Performance
+
+Part of the context here is what might be seen as an array of modes, styles, and contexts.
+
+| Implementation-Context Mode | Test / Analysis Mode | Debug Mode | Production Release Mode |
+| :--- | :--- | :--- | :--- |
+| **1. Classic Single-Thread, Single-Core, Scale-less Generic-Uniform-Load Mode** | | | |
+| **2. Secure & Hot Regions Mode** | | | |
+| **3. Multi-Core, Multi-Thread, Scale-Dependent Mode** | | | |
+| **4. Stateless Parallel Lambda-Mode** *(e.g., Erlang-style for high telecom-scale)* | | | |
+| **5. GPU / TPU / _PU Parallel Mode** | | | |
+
+
+#### X axis: Holzman-Type Development-Modes
+
+1. Test/Analysis Mode
+2. Debug Mode
+3. Production Release Mode
+
+#### Y Axis: Implementation-Context Modes
+
+1. Classic Single-Thread, Single-Core, Scale-less Generic-Uniform-Load Mode: maximizing stack pre-allocation, minimizing heap allocation, etc.
+2. Secure & Hot Regions Mode: Branchless conditionals, cache management, prediction-anticipation management, loop unrolling, optimized types and calculations, inline/naked assembly language, etc. 
+3. Multi-Core, Multi-Thread, Scale-Dependent Mode
+4. Stateless Parallel (CPU ?) Lambda-Mode (Where scale justifies creating maybe like erlang for telecom industry)
+5. GPU/TPU/_PU Parallel Mode: Cuda Kernals & PTX, AMD ROCm, etc.; unified memory systems, etc. 
+
+(x and y are arbitrary here.)
+
+
+
+
+In this context, this idea is to (baby steps from crude starting point) explore systems, focusing on Rust, to get eval/analytics numbers on such things as:
 
 
 # code_heatmap_5000: empirical and dynamic code analysis 
@@ -50,29 +94,18 @@ These parts may also frame out MVP steps, with some Dashboard/Report (terminal/T
 - MVP 1.5: Supplemental
 
 
+It is somewhat open-ended how to use the quad-report, in terms of the overall scope of making a Liebig's Barrel model of how the code runs. Are there big gaps or only small ones? How many gaps are there? Is the barrel a normal barrel with microscopic gaps, or a ravaged-skeleton with vastly different cooper-lengths? Could/should this be scored? Is this unavoidable or preventable? etc.
+ 
+1. There is some low-hanging fruit, such as top-N for three high areas, and maybe bottom-N for low-low. 
+2. There is overall meta-data about that part of the quad (e.g. how much of the time/cpu/ram is 'high high' using? 1% vs. 99%? How many of the functions/loops are in each quad? etc.
+3. There may also be other uses such as boundaries/clusters. E.g. possibly, in the case of a program that is already optimized the boundary/transition/riparian-zone between each quad might be 'smooth' and gradual. Whereas a program with some extremely un-optimized parts might have larger disjunction/clustering between the loops/functions that are in one or another quad. 
 
-# Mapping Code Performance
+Ideally this could be tailored towards 'preventable issues to be fixed' vs. 'inevitable natural differences in loop/fn heat' 
 
-Part of the context here is what might be seen as an array of modes, styles, and contexts.
+Two possible 'modes' for using this tool are:
+1. Looking at heat, which might or might not be natural differences (you can't tell unless you look) (maybe the default)
+2. Identifying patterns or signatures that are not just 'places to look for issues that might not exist' but that are likely issues themselves detected directly. (maybe speculative)
 
-
-Y axis: Holzman-type Development-Modes
-
-1. Test/Analysis Mode
-2. Debug Mode
-3. Production Release Mode
-
-X Axis: Implementation-Context-Modes
-
-1. Classic Single-Thread, Single-Core, Scale-less Generic-Uniform-Load Mode
-2. Secure Hot Loops Mode
-3. Multi-Core, Multi-Thread, Scale-Dependent Mode
-4. Stateless Parallel (CPU ?) Lambda-Mode (Where scale justifies creating maybe like erlang for telecom industry)
-5. GPU/TPU/_PU Parallel Mode
-
-
-
-In this context, this idea is to (baby steps from crude starting point) explore systems, focusing on Rust, to get eval/analytics numbers on such things as:
 
 
 # MVP Overview:
@@ -104,8 +137,8 @@ but a not-loop function... will at least on a first pass be counted as spotted? 
 ## Overall Workflow:
 
 For design we will consider two general approaches, of which a hybrid may (or may not) eventually be used. 
-1. Adding measurement-inspection code to a repo.
-2. Using Rust compile tools to inspect without modifying code.
+1. Using Rust compile tools to inspect without modifying code.
+2. Adding measurement-inspection code to a repo.
 
 
 ## Naive Approach 1:
@@ -244,7 +277,7 @@ cargo-perf complements clippy with checks specific to async code and common loop
 
 7. Some types/implementations of analysis do not scale well:
 
-- AST: While I assume that some people will want to one-hammer-everything-nails turn this into an AST project, I want to look more closely at where this makes sense or not. E.g. for a small project an AST (or similar model) might help conceptually and practically. However, The initial use-case for code_heatmap_5000 is https://github.com/pumpkin-mc/pumpkin , where pumpkin-mc is so big that it literally crashes a better than normal computer to just open the zed editor when it runs the Rust Language Server (possibly: to build the AST) to look at a file. 
+- AST: While I assume that some people will want to one-hammer-everything-nails turn this into an AST project, I want to look more closely at where this makes sense or not. E.g. for a small project an AST (or similar model) might help conceptually and practically. However, an initial larger-scale use-case for code_heatmap_5000 is https://github.com/pumpkin-mc/pumpkin , where pumpkin-mc is so big that it literally crashes a better than normal computer to just open the zed editor when it runs the Rust Language Server (possibly: to build the AST) to look at a file. 
 
 Part of the core-idea here is analysis that scales with sanity. 
 
@@ -343,15 +376,22 @@ This tool is not (currently) conceived of as being for cases where everything is
 
 # MVP-1 Scope:
 
-1. use cargo/samply tools not file-changes
-2. use a parameter specified Top-N quadrant report
-3. the low/low portion of the quadrant could contain some overall metrics such as what portion of function / loops are in that group, maybe what portion of time is used by that group (which might be an indicator of how big the gaps are (e.g. if 99.9% of functions and loops are in low, low, that's probably a good sign... maybe). 
+1. Use cargo/samply tools to look at functions and loops, not (yet, if ever) file-changes for bespoke regions within functions and loops.
+
+2. Use/Output a parameter-specified Top-N quadrant report, e.g. overall data about each quadrant, and top-N examples of path-to-fn/loop in 3/4 quadrants.
+
+3. For quad 4:4 (low,low) for which there is no need to give examples (though 
+one or two might be academically useful in terms of looking at the bottom N lowest of the low...) the low/low portion of the quadrant could contain some overall metrics such as what portion of function / loops are in that group, maybe what portion of time is used by that group (which might be an indicator of how big the gaps are (e.g. if 99.9% of functions and loops are in low, low, that's probably a good sign... maybe). (Note: maybe there should be a high-level quad for overall data for all four regions?)
+
+4. Maybe: wizard_wrapper_module.rs, a Q&A bash-using module for (fedora) linux that can be called by main to semi-automate the overall process (including checking to see that things are installed). E.g. Q&A -> What is the path to the crate you want to test (required)? Is this default path to save the results-files ok (y/n)? [] Is this default path to save the report files ok (y/n)? [] etc.
+
+# Not in MVP-1:
+1. super-nuanced async/atomic/concurrent/parallel analysis
 
 
-# Out of Scope (For now):
-- automated fixes or actions on original code itself (suggestions are in scope)
-- replacing or reinventing existing tools / features
-- languages other than Rust
-- a 'heavy AST', type-analysis, etc.
-- extremely arcane/exotic use-cases
-
+# Far Out of Scope (currently):
+1. automated fixes or actions on original code itself (suggestions are in scope)
+2. replacing or reinventing existing tools / features
+3. languages other than Rust
+4. a 'heavy AST', type-analysis, etc.
+5. extremely arcane/exotic use-cases
