@@ -1,0 +1,11 @@
+[package]
+name = "code_heatmap_5000"
+version = "0.1.0"
+edition = "2024"
+
+
+[dependencies]
+# Intentionally empty: POC-1 uses std only.
+# Third-party *tools* (cargo-llvm-cov, llvm-tools) produce the LCOV input.
+
+
