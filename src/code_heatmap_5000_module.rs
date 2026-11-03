@@ -1,4 +1,4 @@
-//! # code_heatmap_5000 — POC-1: Primary Count-Heat (first slice of MVP 1.1)
+//! # code_heatmap_5000_module.rs — POC-1: Primary Count-Heat (first slice of MVP 1.1)
 //!
 //! ## Development phase & use-type
 //! - Phase: POC-1. First runnable slice of MVP 1.1 ("Primary Count").
@@ -66,13 +66,12 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
 // ============================================================================
 // Constants (all loops and buffers are bounded by these)
 // ============================================================================
@@ -134,6 +133,10 @@ usage: code_heatmap_5000 --lcov /ABSOLUTE/path/file.lcov --out-dir /ABSOLUTE/out
   --out-dir  directory for code_heatmap_5000_report.txt and code_heatmap_5000_sites.tsv
   --top-n    rows per Top-N table (default 20)
 All paths must be absolute.";
+
+/// Minimum count for a site to take part in co-count groups. Identical counts
+/// below this are too likely to be coincidence to indicate structural coupling.
+const CO_COUNT_MIN_COUNT: u64 = 100_000;
 
 // ============================================================================
 // Error codes
@@ -207,6 +210,8 @@ pub enum HeatmapError {
     AnaFileIndexInvalid = 402,
     AnaSiteIndexInvalid = 403,
     AnaHistogramIndexInvalid = 404,
+    AnaFunctionLineIndexOverflow = 405,
+    AnaCoCountRunInvalid = 406,
 
     // 500–599: report output
     RptCreateDirectoryFailed = 501,
@@ -241,7 +246,9 @@ impl HeatmapError {
             | HeatmapError::SrcOpenTransient
             | HeatmapError::RptOpenTransient => true,
 
-            HeatmapError::CliTooManyArguments
+            HeatmapError::AnaFunctionLineIndexOverflow
+            | HeatmapError::AnaCoCountRunInvalid
+            | HeatmapError::CliTooManyArguments
             | HeatmapError::CliUnknownFlag
             | HeatmapError::CliMissingFlagValue
             | HeatmapError::CliMissingLcovPath
@@ -322,6 +329,10 @@ impl HeatmapError {
 impl std::fmt::Display for HeatmapError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let description: &str = match self {
+            HeatmapError::AnaFunctionLineIndexOverflow => {
+                "function-line index count sum overflowed"
+            }
+            HeatmapError::AnaCoCountRunInvalid => "co-count group range invalid",
             HeatmapError::CliTooManyArguments => "too many command-line arguments",
             HeatmapError::CliUnknownFlag => "unknown command-line flag",
             HeatmapError::CliMissingFlagValue => "flag given without a value",
@@ -543,6 +554,11 @@ struct HeatSite {
     execution_count: u64,
     /// Number of LCOV function instances merged into this site (generics).
     merged_instance_count: u32,
+    /// Loops only: summed entry count (all instances) of the enclosing
+    /// function's definition line. `None` for function sites, or when no
+    /// enclosing function was found. Basis of the derived ratio
+    /// "loop header executions per call of the enclosing function".
+    enclosing_function_entry_count: Option<u64>,
 }
 
 /// Which loop keyword began a detected loop header line.
@@ -564,13 +580,18 @@ impl LoopKeyword {
 }
 
 /// Transparency counters for the loop scan (reported in the provenance block).
+/// Skip reasons are split so that no file is silently unexplained.
 #[derive(Debug, Default, Clone, Copy)]
 struct LoopScanStatistics {
     files_total: usize,
     files_scanned: usize,
     files_skipped_cold: usize,
     files_skipped_non_absolute_path: usize,
-    files_skipped_unreadable: usize,
+    files_skipped_not_found: usize,
+    files_skipped_permission_denied: usize,
+    files_skipped_line_too_long: usize,
+    files_skipped_too_many_lines: usize,
+    files_skipped_other_error: usize,
     loop_headers_found: usize,
     loop_headers_without_line_data: usize,
 }
@@ -643,6 +664,8 @@ struct ReportInputs<'a> {
     loop_summary: &'a HeatKindSummary,
     loop_scan_statistics: &'a LoopScanStatistics,
     top_n_limit: usize,
+    /// Duplicate `FN` names within a file (integrity check; expected 0).
+    duplicate_function_name_count: usize,
 }
 
 // ============================================================================
@@ -712,7 +735,36 @@ pub fn append_error_code_to_log(error_code: HeatmapError) -> Result<(), HeatmapE
 // Orchestration
 // ============================================================================
 
-/// Runs the full POC-1 pipeline for an already-validated configuration.
+/// Runs the full POC-1.1 count-heat pipeline for an already-validated configuration.
+///
+/// # Project context
+/// This is the single orchestration point of the tool. Each step consumes the
+/// previous step's output; nothing is written to disk until every report has
+/// been rendered successfully in memory, so a failure never leaves a
+/// half-written report next to a complete one.
+///
+/// # Steps
+/// 1. Open and parse the LCOV file (fatal on failure: no LCOV, no data).
+/// 2. Build function sites (exact LLVM entry counts; monomorphized instances
+///    at one source line merged), then sort + summarize them.
+/// 3. Scan non-cold source files for loop headers (Tier 2: an unreadable file
+///    is skipped and counted, never fatal), then sort + summarize loop sites.
+/// 4. Render the text report and the all-sites TSV into memory.
+/// 5. Create the output directory, write both files, then print the text
+///    report to stdout.
+///
+/// # Arguments
+/// - `run_configuration`: validated paths (absolute) and Top-N limit.
+///   Each value is re-checked through its `.get()` before use.
+///
+/// # Returns
+/// - `Ok(())` when both files were written and the report was printed.
+/// - `Err(HeatmapError)`: the unique code of the first failing step,
+///   propagated unchanged to `main` (Tier 3), which logs the numeric code.
+///
+/// # Modes
+/// - Production: no printing here; errors are returned as codes only.
+/// - Debug: callees print verbose diagnostics via gated `eprintln!`.
 fn run_heatmap_with_configuration(
     run_configuration: &HeatmapRunConfiguration,
 ) -> Result<(), HeatmapError> {
@@ -729,17 +781,17 @@ fn run_heatmap_with_configuration(
     let mut lcov_reader = BufReader::new(lcov_file);
     let coverage_records = parse_lcov_reader(&mut lcov_reader)?;
 
-    // Step 2: function sites (exact entry counts).
-    let mut function_sites = build_function_sites(&coverage_records)?;
-    sort_sites_hottest_first(&mut function_sites);
-    let function_summary = summarize_sorted_sites(&function_sites)?;
+    // Step 2: function sites (exact entry counts), sorted + summarized together.
+    let (mut function_sites, duplicate_function_name_count) =
+        build_function_sites(&coverage_records)?;
+    let function_summary = sort_and_summarize_sites(&mut function_sites)?;
 
-    // Step 3: loop sites (lexical scan; per-file failures absorbed at Tier 2).
+    // Step 3: loop sites (lexical scan; per-file failures absorbed at Tier 2),
+    // sorted + summarized together.
     let (mut loop_sites, loop_scan_statistics) = scan_all_files_for_loops(&coverage_records);
-    sort_sites_hottest_first(&mut loop_sites);
-    let loop_summary = summarize_sorted_sites(&loop_sites)?;
+    let loop_summary = sort_and_summarize_sites(&mut loop_sites)?;
 
-    // Step 4: render reports into memory, then write files, then stdout.
+    // Step 4: render reports into memory (no disk writes yet).
     let report_file_path = output_directory_path.join(REPORT_FILE_NAME);
     let sites_tsv_file_path = output_directory_path.join(SITES_TSV_FILE_NAME);
     let report_inputs = ReportInputs {
@@ -753,6 +805,7 @@ fn run_heatmap_with_configuration(
         loop_summary: &loop_summary,
         loop_scan_statistics: &loop_scan_statistics,
         top_n_limit,
+        duplicate_function_name_count,
     };
 
     let mut report_bytes: Vec<u8> = Vec::with_capacity(REPORT_BUFFER_INITIAL_CAPACITY);
@@ -760,6 +813,7 @@ fn run_heatmap_with_configuration(
     let mut sites_tsv_bytes: Vec<u8> = Vec::with_capacity(REPORT_BUFFER_INITIAL_CAPACITY);
     write_sites_tsv(&mut sites_tsv_bytes, &report_inputs)?;
 
+    // Step 5: write files, then stdout.
     if let Err(_io_error) = fs::create_dir_all(output_directory_path) {
         #[cfg(debug_assertions)]
         eprintln!("CHM-501: create_dir_all failed: {}", _io_error);
@@ -1158,15 +1212,52 @@ fn parse_lcov_count(count_text: &str) -> Result<u64, HeatmapError> {
 // Function sites
 // ============================================================================
 
-/// Builds one function site per (file, definition line), summing the entry
-/// counts of all monomorphized instances defined at that line.
-fn build_function_sites(records: &[FileCoverageRecord]) -> Result<Vec<HeatSite>, HeatmapError> {
+/// Builds one FUNCTION heat site per (source file, definition line).
+///
+/// # Project context
+/// Function entry counts are the primary count-heat signal: exact LLVM
+/// counters (not samples) for how often each function was entered during the
+/// instrumented run. Identity is `source_path:line`, not the function name,
+/// because (a) names may be mangled and (b) generic functions produce one
+/// LCOV entry per monomorphized instance, all at the same source line.
+///
+/// # Merge rule
+/// All instances defined at the same line are merged into one site: their
+/// counts are summed and `merged_instance_count` records how many were merged.
+/// The first instance's name is kept as `display_name`.
+///
+/// # Integrity check (duplicate names)
+/// `FNDA` counts are stored by name, so two `FN` entries with the same name
+/// in one file cannot be told apart: each would receive the shared total.
+/// With mangled LCOV this does not happen. If the LCOV was demangled *before*
+/// parsing, distinct instances can collapse to one name, which causes double
+/// counting. The number of such duplicates is returned and shown in the
+/// report's provenance block (expected: 0).
+///
+/// # Arguments
+/// - `records`: parsed LCOV records, one per source file.
+///
+/// # Returns
+/// - `Ok((function_sites, duplicate_function_name_count))`. Sites are in
+///   LCOV order (NOT sorted): pass them to `sort_and_summarize_sites`.
+/// - `Err(HeatmapError::AnaSiteIndexInvalid)`: internal index invariant broken.
+/// - `Err(HeatmapError::AnaCountOverflow)`: merged count exceeded u64.
+fn build_function_sites(
+    records: &[FileCoverageRecord],
+) -> Result<(Vec<HeatSite>, usize), HeatmapError> {
     let mut function_sites: Vec<HeatSite> = Vec::new();
+    let mut duplicate_function_name_count: usize = 0;
 
     for (file_index, record) in records.iter().enumerate() {
         let mut site_index_by_line: HashMap<SourceLineNumber, usize> = HashMap::new();
+        let mut function_names_seen: HashSet<&str> =
+            HashSet::with_capacity(record.function_definitions.len());
 
         for (definition_line, function_name) in record.function_definitions.iter() {
+            if !function_names_seen.insert(function_name.as_str()) {
+                duplicate_function_name_count = duplicate_function_name_count.saturating_add(1);
+            }
+
             let entry_count = record
                 .function_entry_counts
                 .get(function_name)
@@ -1199,13 +1290,14 @@ fn build_function_sites(records: &[FileCoverageRecord]) -> Result<Vec<HeatSite>,
                         display_name: function_name.clone(),
                         execution_count: entry_count,
                         merged_instance_count: 1,
+                        enclosing_function_entry_count: None,
                     });
                     site_index_by_line.insert(*definition_line, new_site_index);
                 }
             }
         }
     }
-    Ok(function_sites)
+    Ok((function_sites, duplicate_function_name_count))
 }
 
 // ============================================================================
@@ -1250,14 +1342,38 @@ fn scan_all_files_for_loops(records: &[FileCoverageRecord]) -> (Vec<HeatSite>, L
                     .saturating_add(scan_outcome.loop_headers_without_line_data);
                 all_loop_sites.extend(scan_outcome.loop_sites);
             }
-            Err(_scan_error) => {
+            Err(scan_error) => {
                 #[cfg(debug_assertions)]
                 eprintln!(
                     "loop scan skipped {}: {}",
-                    record.source_path_text, _scan_error
+                    record.source_path_text, scan_error
                 );
-                scan_statistics.files_skipped_unreadable =
-                    scan_statistics.files_skipped_unreadable.saturating_add(1);
+                // Tier 2: absorb, count by reason, continue with the next file.
+                match scan_error {
+                    HeatmapError::SrcOpenNotFound => {
+                        scan_statistics.files_skipped_not_found =
+                            scan_statistics.files_skipped_not_found.saturating_add(1);
+                    }
+                    HeatmapError::SrcOpenPermissionDenied => {
+                        scan_statistics.files_skipped_permission_denied = scan_statistics
+                            .files_skipped_permission_denied
+                            .saturating_add(1);
+                    }
+                    HeatmapError::SrcLineTooLong => {
+                        scan_statistics.files_skipped_line_too_long = scan_statistics
+                            .files_skipped_line_too_long
+                            .saturating_add(1);
+                    }
+                    HeatmapError::SrcTooManyLines => {
+                        scan_statistics.files_skipped_too_many_lines = scan_statistics
+                            .files_skipped_too_many_lines
+                            .saturating_add(1);
+                    }
+                    _ => {
+                        scan_statistics.files_skipped_other_error =
+                            scan_statistics.files_skipped_other_error.saturating_add(1);
+                    }
+                }
             }
         }
     }
@@ -1280,19 +1396,42 @@ fn scan_one_source_file(
     scan_source_reader(&mut source_reader, file_index, record)
 }
 
-/// Scans source text line by line for loop headers and attaches LCOV counts.
+/// Scans one source file line by line for loop headers and builds LOOP sites.
+///
+/// # Project context
+/// LLVM coverage has no "loop" concept, only per-line counts. This scan is
+/// the lightweight (no AST) bridge: it finds lines that start a loop, and
+/// takes that line's LCOV `DA` count as the loop's count. That count
+/// approximates the number of iterations, which is what makes a loop hot
+/// even inside a rarely called function.
+///
+/// # Per detected loop header
+/// 1. Skip comment lines (`//` lines; `/* ... */` blocks that start a line).
+/// 2. Detect `for` / `while` / `loop` (optionally labeled) at line start.
+/// 3. Look up the line's `DA` count. If there is none (not instrumented,
+///    cfg'd out, or a lexical false positive), the header is counted in
+///    `loop_headers_without_line_data` and skipped.
+/// 4. Attribute the loop to the nearest preceding function definition line
+///    (see `find_enclosing_function`). Store that function's summed entry
+///    count, which the report uses for "iterations per call".
+///
+/// # Arguments
+/// - `source_reader`: buffered source text (a file in production, a `Cursor` in tests).
+/// - `file_index`: index of `record` in the records slice (stored in each site).
+/// - `record`: this file's LCOV data (function definitions, line counts).
+///
+/// # Returns
+/// - `Ok(SourceScanOutcome)`: loop sites plus transparency counters.
+/// - `Err(SrcReadFailed | SrcLineTooLong | SrcTooManyLines |
+///   SrcLineNumberOverflow | AnaFunctionLineIndexOverflow | TypeLineNumberZero)`.
+///   The caller (`scan_all_files_for_loops`) absorbs these at Tier 2: the
+///   file is skipped, the reason is counted, and the analysis continues.
 fn scan_source_reader<R: BufRead>(
     source_reader: &mut R,
     file_index: usize,
     record: &FileCoverageRecord,
 ) -> Result<SourceScanOutcome, HeatmapError> {
-    // Function definition lines, sorted, for "enclosing function" attribution.
-    let mut function_lines: Vec<(SourceLineNumber, &str)> = record
-        .function_definitions
-        .iter()
-        .map(|(line, name)| (*line, name.as_str()))
-        .collect();
-    function_lines.sort_by_key(|(line, _name)| *line);
+    let function_line_index = build_function_line_index(record)?;
 
     let mut scan_outcome = SourceScanOutcome::default();
     let mut line_buffer: Vec<u8> = Vec::with_capacity(256);
@@ -1347,8 +1486,6 @@ fn scan_source_reader<R: BufRead>(
         let header_line_count = match record.line_execution_counts.get(&line_number) {
             Some(&count) => count,
             None => {
-                // No region on this line: not instrumented, cfg'd out, or a
-                // lexical false positive (e.g. text inside a string literal).
                 scan_outcome.loop_headers_without_line_data = scan_outcome
                     .loop_headers_without_line_data
                     .saturating_add(1);
@@ -1356,7 +1493,12 @@ fn scan_source_reader<R: BufRead>(
             }
         };
 
-        let enclosing_function_name = find_enclosing_function_name(&function_lines, line_number);
+        let (enclosing_function_name, enclosing_function_entry_count) =
+            match find_enclosing_function(&function_line_index, line_number) {
+                Some(entry) => (entry.function_name, Some(entry.summed_entry_count)),
+                None => ("<no enclosing fn found>", None),
+            };
+
         let mut loop_display_name =
             String::with_capacity(enclosing_function_name.len().saturating_add(16));
         loop_display_name.push_str(loop_keyword.as_label());
@@ -1369,25 +1511,111 @@ fn scan_source_reader<R: BufRead>(
             display_name: loop_display_name,
             execution_count: header_line_count,
             merged_instance_count: 1,
+            enclosing_function_entry_count,
         });
     }
     Err(HeatmapError::SrcTooManyLines)
 }
 
-/// Returns the name of the nearest function defined at or before `line_number`.
-fn find_enclosing_function_name<'a>(
-    sorted_function_lines: &[(SourceLineNumber, &'a str)],
+/// One function definition line in one source file, used only to attribute
+/// loops to their enclosing function.
+///
+/// Entry counts of all LCOV instances at the same line are summed, which is
+/// the same merge rule as function sites, so the per-call ratio uses the same
+/// denominator the FUNCTIONS section shows. `function_name` borrows from the
+/// `FileCoverageRecord`; the index lives only for the duration of one file scan.
+#[derive(Debug, Clone, Copy)]
+struct FunctionLineEntry<'name> {
     line_number: SourceLineNumber,
-) -> &'a str {
-    let insertion_point = sorted_function_lines
-        .partition_point(|(function_line, _name)| *function_line <= line_number);
-    match insertion_point
+    function_name: &'name str,
+    summed_entry_count: u64,
+}
+
+/// Builds the sorted, same-line-merged function index for one source file.
+///
+/// # Steps
+/// 1. One entry per `FN` definition, with that instance's `FNDA` count
+///    (0 if the instance has no `FNDA` entry).
+/// 2. Sort by line number (required by the binary search in
+///    `find_enclosing_function`).
+/// 3. Merge adjacent entries on the same line by summing counts (generics).
+///
+/// # Arguments
+/// - `record`: one file's LCOV data.
+///
+/// # Returns
+/// - `Ok(entries)`: sorted ascending by line, one entry per distinct line.
+/// - `Err(HeatmapError::AnaFunctionLineIndexOverflow)`: summed count exceeded u64.
+fn build_function_line_index(
+    record: &FileCoverageRecord,
+) -> Result<Vec<FunctionLineEntry<'_>>, HeatmapError> {
+    let mut unmerged_entries: Vec<FunctionLineEntry<'_>> = record
+        .function_definitions
+        .iter()
+        .map(|(line_number, function_name)| FunctionLineEntry {
+            line_number: *line_number,
+            function_name: function_name.as_str(),
+            summed_entry_count: record
+                .function_entry_counts
+                .get(function_name)
+                .copied()
+                .unwrap_or(0),
+        })
+        .collect();
+    unmerged_entries.sort_by_key(|entry| entry.line_number);
+
+    let mut merged_entries: Vec<FunctionLineEntry<'_>> = Vec::with_capacity(unmerged_entries.len());
+    for entry in unmerged_entries {
+        let same_line_as_last = merged_entries
+            .last()
+            .map(|last_entry| last_entry.line_number == entry.line_number)
+            .unwrap_or(false);
+        if same_line_as_last {
+            if let Some(last_entry) = merged_entries.last_mut() {
+                last_entry.summed_entry_count = match last_entry
+                    .summed_entry_count
+                    .checked_add(entry.summed_entry_count)
+                {
+                    Some(sum) => sum,
+                    None => return Err(HeatmapError::AnaFunctionLineIndexOverflow),
+                };
+            }
+        } else {
+            merged_entries.push(entry);
+        }
+    }
+    Ok(merged_entries)
+}
+
+/// Returns the function whose definition line is the nearest at or before
+/// `line_number`, which is taken as the function enclosing that line.
+///
+/// # Approximation (documented limitation)
+/// Without an AST there are no function end-lines, so "nearest preceding
+/// definition" is used. This is usually right. It can be wrong for a loop
+/// placed after a nested fn or closure that ends before the loop, in which
+/// case the loop is attributed to that inner fn. The report flags the most
+/// visible symptom: a counted loop whose attributed function has count 0
+/// ("attribution suspect").
+///
+/// # Arguments
+/// - `sorted_function_lines`: output of `build_function_line_index` (ascending).
+/// - `line_number`: the loop header's line.
+///
+/// # Returns
+/// - `Some(entry)`: a copy of the enclosing entry.
+/// - `None`: no function is defined at or before this line (e.g. a loop in a
+///   `const`/`static` initializer, or a lexical false positive near the top).
+fn find_enclosing_function<'name>(
+    sorted_function_lines: &[FunctionLineEntry<'name>],
+    line_number: SourceLineNumber,
+) -> Option<FunctionLineEntry<'name>> {
+    let insertion_point =
+        sorted_function_lines.partition_point(|entry| entry.line_number <= line_number);
+    insertion_point
         .checked_sub(1)
         .and_then(|index| sorted_function_lines.get(index))
-    {
-        Some((_function_line, function_name)) => function_name,
-        None => "<no enclosing fn found>",
-    }
+        .copied()
 }
 
 /// Detects a loop header at the start of an already left-trimmed line.
@@ -1482,6 +1710,37 @@ fn sort_sites_hottest_first(sites: &mut [HeatSite]) {
             })
             .then_with(|| left_site.line_number.cmp(&right_site.line_number))
     });
+}
+
+/// Sorts one kind of site hottest-first, then summarizes it — always in that order.
+///
+/// # Project context
+/// `summarize_sorted_sites` requires hottest-first input. Its concentration
+/// figures ("the hottest K sites carry 50% / 90% / 99% of all counts") walk
+/// the list from the top and record the first position where each threshold
+/// is crossed. On unsorted input those figures are silently wrong: no error,
+/// no panic, just misleading numbers in the report.
+///
+/// This function exists so that no caller can summarize without sorting.
+/// (One POC-1.1 call path lost its sort during an edit; this closes that gap.)
+///
+/// # Arguments
+/// - `sites`: all function sites, or all loop sites (one kind only; counts of
+///   different kinds have different units and must not be mixed). The slice
+///   is reordered in place; afterwards it is hottest-first with a
+///   deterministic tie-break (file index, then line number).
+///
+/// # Returns
+/// - `Ok(HeatKindSummary)` describing the now-sorted `sites`.
+/// - `Err(HeatmapError::AnaCountOverflow)` or
+///   `Err(HeatmapError::AnaHistogramIndexInvalid)`, propagated unchanged from
+///   `summarize_sorted_sites`. Codes are unique, so `?` does not obscure the cause.
+///
+/// # Modes
+/// No mode-specific behavior; both callees are panic-free.
+fn sort_and_summarize_sites(sites: &mut [HeatSite]) -> Result<HeatKindSummary, HeatmapError> {
+    sort_sites_hottest_first(sites);
+    summarize_sorted_sites(sites)
 }
 
 /// Computes totals, zero-count sites, concentration, and decade histogram.
@@ -1595,8 +1854,8 @@ fn lookup_source_path(
     }
 }
 
-/// Writes the human-readable report: provenance, loop-scan coverage, then
-/// one section each for functions (calls) and loops (header-line count).
+/// Writes the human-readable report: provenance, loop-scan coverage, the
+/// FUNCTIONS and LOOPS sections, then co-count groups.
 fn write_text_report<W: Write>(
     report_writer: &mut W,
     inputs: &ReportInputs,
@@ -1604,12 +1863,12 @@ fn write_text_report<W: Write>(
     let stats = inputs.loop_scan_statistics;
     writeln!(
         report_writer,
-        "code_heatmap_5000 :: POC-1 count-heat report"
+        "code_heatmap_5000 :: POC-1.1 count-heat report"
     )
     .map_err(report_buffer_write_error)?;
     writeln!(
         report_writer,
-        "============================================="
+        "==============================================="
     )
     .map_err(report_buffer_write_error)?;
     writeln!(report_writer).map_err(report_buffer_write_error)?;
@@ -1637,6 +1896,7 @@ fn write_text_report<W: Write>(
     writeln!(report_writer, "  run stop condition      : D = whenever the instrumented program exited cleanly (no in-tool cap)").map_err(report_buffer_write_error)?;
     writeln!(report_writer, "  function count meaning  : entry count (LCOV FNDA); monomorphized instances at one source line are summed").map_err(report_buffer_write_error)?;
     writeln!(report_writer, "  loop count meaning      : loop-header line execution count (LCOV DA); approximately the iteration count").map_err(report_buffer_write_error)?;
+    writeln!(report_writer, "  per-call ratio meaning  : loop count / summed entry count of nearest preceding fn definition (approximate)").map_err(report_buffer_write_error)?;
     writeln!(
         report_writer,
         "  loop detection method   : lexical line scan for for/while/loop at line start (no AST)"
@@ -1644,7 +1904,7 @@ fn write_text_report<W: Write>(
     .map_err(report_buffer_write_error)?;
     writeln!(
         report_writer,
-        "  time-heat               : NOT measured in POC-1"
+        "  time-heat               : NOT measured in POC-1.x"
     )
     .map_err(report_buffer_write_error)?;
     writeln!(
@@ -1653,6 +1913,7 @@ fn write_text_report<W: Write>(
         inputs.records.len()
     )
     .map_err(report_buffer_write_error)?;
+    writeln!(report_writer, "  duplicate FN names      : {}  (expected 0; nonzero = names collapsed before parsing, function counts may be double-counted)", inputs.duplicate_function_name_count).map_err(report_buffer_write_error)?;
     writeln!(report_writer).map_err(report_buffer_write_error)?;
     writeln!(report_writer, "[loop-scan coverage]").map_err(report_buffer_write_error)?;
     writeln!(
@@ -1675,8 +1936,32 @@ fn write_text_report<W: Write>(
     .map_err(report_buffer_write_error)?;
     writeln!(
         report_writer,
-        "  files skipped: unreadable / read error     : {}",
-        stats.files_skipped_unreadable
+        "  files skipped: not found                   : {}",
+        stats.files_skipped_not_found
+    )
+    .map_err(report_buffer_write_error)?;
+    writeln!(
+        report_writer,
+        "  files skipped: permission denied           : {}",
+        stats.files_skipped_permission_denied
+    )
+    .map_err(report_buffer_write_error)?;
+    writeln!(
+        report_writer,
+        "  files skipped: line > MAX_LINE_BYTES       : {}",
+        stats.files_skipped_line_too_long
+    )
+    .map_err(report_buffer_write_error)?;
+    writeln!(
+        report_writer,
+        "  files skipped: too many lines              : {}",
+        stats.files_skipped_too_many_lines
+    )
+    .map_err(report_buffer_write_error)?;
+    writeln!(
+        report_writer,
+        "  files skipped: other error                 : {}",
+        stats.files_skipped_other_error
     )
     .map_err(report_buffer_write_error)?;
     writeln!(
@@ -1712,6 +1997,8 @@ fn write_text_report<W: Write>(
         inputs.records,
         inputs.top_n_limit,
     )?;
+    writeln!(report_writer).map_err(report_buffer_write_error)?;
+    write_co_count_groups(report_writer, inputs)?;
     Ok(())
 }
 
@@ -1845,19 +2132,184 @@ fn write_heat_kind_section<W: Write>(
             )
             .map_err(report_buffer_write_error)?;
         }
+        if let Some(enclosing_entry_count) = site.enclosing_function_entry_count {
+            if enclosing_entry_count == 0 {
+                if site.execution_count > 0 {
+                    // A counted loop inside a never-entered fn means the
+                    // nearest-preceding-FN attribution picked the wrong fn.
+                    write!(
+                        report_writer,
+                        "  [enclosing fn count 0: attribution suspect]"
+                    )
+                    .map_err(report_buffer_write_error)?;
+                }
+            } else {
+                write!(
+                    report_writer,
+                    "  [~{:.1} per call of enclosing fn]",
+                    (site.execution_count as f64) / (enclosing_entry_count as f64)
+                )
+                .map_err(report_buffer_write_error)?;
+            }
+        }
         writeln!(report_writer).map_err(report_buffer_write_error)?;
     }
     Ok(())
 }
 
-/// Writes every site (not only Top-N) as TSV for later tools (POC-2 joins).
+/// Writes the CO-COUNT GROUPS section: hot sites (functions and loops
+/// together) whose exact counts are identical.
+///
+/// # Project context
+/// LLVM counts are exact. When two sites at >= `CO_COUNT_MIN_COUNT` share
+/// exactly the same count, coincidence is unlikely and structural coupling is
+/// likely. Typical causes: a 1:1 caller/callee pair (e.g. `calc_distance`
+/// calling `distance`), or a function called once per iteration of a loop.
+/// Such groups are candidates for fusion or inlining review: a hint for a
+/// human, not a verdict. Equal counts on code that ran across threads are
+/// also mild evidence that counter-increment loss was negligible there.
+///
+/// # Method
+/// 1. Collect all function and loop sites with count >= `CO_COUNT_MIN_COUNT`.
+/// 2. Sort by count descending (tie-break: kind, file, line, so the output
+///    is deterministic).
+/// 3. Pass 1: find runs of identical counts of length >= 2.
+/// 4. Pass 2: write the number of groups found, then up to `top_n_limit` groups.
+///
+/// # Arguments
+/// - `report_writer`: in-memory report buffer.
+/// - `inputs`: all report data (sites, records for path lookup, Top-N limit).
+///
+/// # Returns
+/// - `Ok(())`.
+/// - `Err(RptBufferWriteFailed | AnaCoCountRunInvalid | AnaFileIndexInvalid |
+///   TypeLineNumberCorrupted)`, each from its own failure site.
+fn write_co_count_groups<W: Write>(
+    report_writer: &mut W,
+    inputs: &ReportInputs,
+) -> Result<(), HeatmapError> {
+    let mut co_count_members: Vec<(&'static str, &HeatSite)> = Vec::new();
+    for site in inputs.function_sites.iter() {
+        if site.execution_count >= CO_COUNT_MIN_COUNT {
+            co_count_members.push(("function", site));
+        }
+    }
+    for site in inputs.loop_sites.iter() {
+        if site.execution_count >= CO_COUNT_MIN_COUNT {
+            co_count_members.push(("loop", site));
+        }
+    }
+    co_count_members.sort_by(|(left_kind, left_site), (right_kind, right_site)| {
+        right_site
+            .execution_count
+            .cmp(&left_site.execution_count)
+            .then_with(|| left_kind.cmp(right_kind))
+            .then_with(|| {
+                left_site
+                    .source_file_index
+                    .cmp(&right_site.source_file_index)
+            })
+            .then_with(|| left_site.line_number.cmp(&right_site.line_number))
+    });
+
+    // Pass 1: find runs of identical counts (length >= 2). Bounded by list length.
+    let mut run_ranges: Vec<(usize, usize)> = Vec::new();
+    let mut run_start_index: usize = 0;
+    for current_index in 1..=co_count_members.len() {
+        let run_continues = match (
+            co_count_members.get(current_index),
+            co_count_members.get(run_start_index),
+        ) {
+            (Some((_, current_site)), Some((_, start_site))) => {
+                current_site.execution_count == start_site.execution_count
+            }
+            _ => false,
+        };
+        if run_continues {
+            continue;
+        }
+        if current_index.saturating_sub(run_start_index) >= 2 {
+            run_ranges.push((run_start_index, current_index));
+        }
+        run_start_index = current_index;
+    }
+
+    // Pass 2: write.
+    writeln!(
+        report_writer,
+        "[CO-COUNT GROUPS]  (identical exact counts >= {}; likely structural coupling)",
+        CO_COUNT_MIN_COUNT
+    )
+    .map_err(report_buffer_write_error)?;
+    writeln!(
+        report_writer,
+        "  groups found: {}   (showing up to {})",
+        run_ranges.len(),
+        inputs.top_n_limit
+    )
+    .map_err(report_buffer_write_error)?;
+
+    for (group_index, (run_start, run_end)) in
+        run_ranges.iter().take(inputs.top_n_limit).enumerate()
+    {
+        let run_members = match co_count_members.get(*run_start..*run_end) {
+            Some(members) => members,
+            None => {
+                #[cfg(all(debug_assertions, not(test)))]
+                debug_assert!(false, "co-count run {}..{} invalid", run_start, run_end);
+                return Err(HeatmapError::AnaCoCountRunInvalid);
+            }
+        };
+        let shared_count = run_members
+            .first()
+            .map(|(_, site)| site.execution_count)
+            .unwrap_or(0);
+        writeln!(
+            report_writer,
+            "  group {}: count {}, {} sites",
+            group_index.saturating_add(1),
+            shared_count,
+            run_members.len()
+        )
+        .map_err(report_buffer_write_error)?;
+        for (kind_label, site) in run_members.iter() {
+            let source_path_text = lookup_source_path(inputs.records, site.source_file_index)?;
+            let line_value = site.line_number.get()?;
+            writeln!(
+                report_writer,
+                "    {:<8}  {}:{}  {}",
+                kind_label, source_path_text, line_value, site.display_name
+            )
+            .map_err(report_buffer_write_error)?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes every site (functions first, then loops; each hottest-first) as TSV.
+///
+/// # Project context
+/// The TSV is the machine-readable data product: complete (not Top-N), with
+/// stable identity `source_path` + `line`, intended for POC-2 to join
+/// time-heat (samply) onto count-heat.
+///
+/// # Column contract (append-only)
+/// `kind, rank, count, percent_of_kind, log10_count, source_path, line, name,
+/// merged_instances, per_enclosing_call`. New columns are only ever appended
+/// at the end, so tools that read existing columns by position keep working.
+/// Empty fields: `log10_count` when count is 0; `per_enclosing_call` for
+/// function rows and for loops without a nonzero enclosing count.
+/// Fields are not escaped (documented limitation).
+///
+/// # Returns
+/// - `Ok(())`, or an error code from `write_tsv_rows` / `RptBufferWriteFailed`.
 fn write_sites_tsv<W: Write>(
     tsv_writer: &mut W,
     inputs: &ReportInputs,
 ) -> Result<(), HeatmapError> {
     writeln!(
         tsv_writer,
-        "kind\trank\tcount\tpercent_of_kind\tlog10_count\tsource_path\tline\tname\tmerged_instances"
+        "kind\trank\tcount\tpercent_of_kind\tlog10_count\tsource_path\tline\tname\tmerged_instances\tper_enclosing_call"
     )
     .map_err(report_buffer_write_error)?;
     write_tsv_rows(
@@ -1877,7 +2329,19 @@ fn write_sites_tsv<W: Write>(
     Ok(())
 }
 
-/// Writes TSV rows for one kind of site.
+/// Writes the TSV rows for one kind of site (see `write_sites_tsv` for the
+/// column contract).
+///
+/// # Arguments
+/// - `tsv_writer`: in-memory TSV buffer.
+/// - `kind_label`: `"function"` or `"loop"` (first column).
+/// - `sorted_sites`: one kind's sites, hottest-first (rank = position + 1).
+/// - `summary`: that kind's summary (its total is the percent denominator).
+/// - `records`: used to resolve each site's file index to its source path.
+///
+/// # Returns
+/// - `Ok(())`.
+/// - `Err(RptBufferWriteFailed | AnaFileIndexInvalid | TypeLineNumberCorrupted)`.
 fn write_tsv_rows<W: Write>(
     tsv_writer: &mut W,
     kind_label: &str,
@@ -1902,27 +2366,46 @@ fn write_tsv_rows<W: Write>(
             write!(tsv_writer, "{:.4}", (site.execution_count as f64).log10())
                 .map_err(report_buffer_write_error)?;
         }
-        writeln!(
+        write!(
             tsv_writer,
-            "\t{}\t{}\t{}\t{}",
+            "\t{}\t{}\t{}\t{}\t",
             source_path_text, line_value, site.display_name, site.merged_instance_count
         )
         .map_err(report_buffer_write_error)?;
+        if let Some(enclosing_entry_count) = site.enclosing_function_entry_count {
+            if enclosing_entry_count > 0 {
+                write!(
+                    tsv_writer,
+                    "{:.4}",
+                    (site.execution_count as f64) / (enclosing_entry_count as f64)
+                )
+                .map_err(report_buffer_write_error)?;
+            }
+        }
+        writeln!(tsv_writer).map_err(report_buffer_write_error)?;
     }
     Ok(())
 }
-
+// ============================================================================
+// Tests (test mode only)
+// ============================================================================
 // ============================================================================
 // Tests (test mode only)
 // ============================================================================
 
+/// Unit tests for POC-1.1 (compiled only under `cargo test`).
+///
+/// All tests use in-memory input (`std::io::Cursor`) and synthetic sites, so
+/// they touch no files except `std::env::temp_dir()` path *values* (never
+/// created or opened). `unwrap`/`assert!` are allowed here (test mode).
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Cursor;
 
-    /// One file, two monomorphized instances of `tick` at line 1, a cold
-    /// `idle` at line 9, and a hot loop header at line 3.
+    /// One file, two monomorphized instances of `tick` at line 1 (500 + 250
+    /// calls), a cold `idle` at line 9, and a hot loop header at line 3
+    /// (75_750 executions = 101 per call of `tick`).
     const SAMPLE_LCOV: &str = "TN:\n\
 SF:/abs/src/world.rs\n\
 FN:1,_ZN5world4tick17h0E\n\
@@ -1940,6 +2423,9 @@ LF:3\n\
 LH:2\n\
 end_of_record\n";
 
+    /// Source text matching `SAMPLE_LCOV`: one real loop at line 3, plus a
+    /// loop keyword inside a line comment (line 2) and inside a block comment
+    /// (lines 5-6) that must NOT be detected.
     const SAMPLE_SOURCE: &str = "fn tick() {\n\
     // for x in not_a_loop\n\
     for entity in entities {\n\
@@ -1950,11 +2436,14 @@ end_of_record\n";
 \n\
 fn idle() {}\n";
 
+    /// Parses `SAMPLE_LCOV` into coverage records (panics on failure: test mode).
     fn parse_sample() -> Vec<FileCoverageRecord> {
         let mut cursor = Cursor::new(SAMPLE_LCOV.as_bytes());
         parse_lcov_reader(&mut cursor).unwrap()
     }
 
+    /// Builds a synthetic site in file index 0 with the given count and line.
+    /// `enclosing_function_entry_count` is `None` (function-site style).
     fn make_site(execution_count: u64, line: u32) -> HeatSite {
         HeatSite {
             source_file_index: 0,
@@ -1962,9 +2451,42 @@ fn idle() {}\n";
             display_name: String::from("test_site"),
             execution_count,
             merged_instance_count: 1,
+            enclosing_function_entry_count: None,
         }
     }
 
+    /// Renders the text report for synthetic site lists.
+    /// Sites must already be hottest-first (callers pass sorted vectors).
+    fn render_text_report(
+        records: &[FileCoverageRecord],
+        function_sites: &[HeatSite],
+        loop_sites: &[HeatSite],
+    ) -> String {
+        let function_summary = summarize_sorted_sites(function_sites).unwrap();
+        let loop_summary = summarize_sorted_sites(loop_sites).unwrap();
+        let statistics = LoopScanStatistics::default();
+        let report_path = std::env::temp_dir().join("r.txt");
+        let tsv_path = std::env::temp_dir().join("s.tsv");
+        let lcov_path = std::env::temp_dir().join("in.lcov");
+        let inputs = ReportInputs {
+            lcov_input_path: &lcov_path,
+            report_file_path: &report_path,
+            sites_tsv_file_path: &tsv_path,
+            records,
+            function_sites,
+            function_summary: &function_summary,
+            loop_sites,
+            loop_summary: &loop_summary,
+            loop_scan_statistics: &statistics,
+            top_n_limit: 10,
+            duplicate_function_name_count: 0,
+        };
+        let mut report_bytes: Vec<u8> = Vec::new();
+        write_text_report(&mut report_bytes, &inputs).unwrap();
+        String::from_utf8(report_bytes).unwrap()
+    }
+
+    /// LCOV parsing: one SF record with all FN/DA entries and the file max count.
     #[test]
     fn lcov_parse_reads_one_record() {
         let records = parse_sample();
@@ -1974,17 +2496,22 @@ fn idle() {}\n";
         assert_eq!(records[0].max_line_execution_count, 75_750);
     }
 
+    /// Function sites: two instances at line 1 merge into one site (750 calls),
+    /// and mangled names are unique, so the duplicate-name counter stays 0.
     #[test]
     fn function_sites_merge_monomorphized_instances() {
         let records = parse_sample();
-        let mut sites = build_function_sites(&records).unwrap();
+        let (mut sites, duplicate_function_name_count) = build_function_sites(&records).unwrap();
         sort_sites_hottest_first(&mut sites);
+        assert_eq!(duplicate_function_name_count, 0);
         assert_eq!(sites.len(), 2);
         assert_eq!(sites[0].execution_count, 750);
         assert_eq!(sites[0].merged_instance_count, 2);
+        assert_eq!(sites[0].enclosing_function_entry_count, None);
         assert_eq!(sites[1].execution_count, 0);
     }
 
+    /// Loop scan: finds the real header at line 3 and ignores keywords in comments.
     #[test]
     fn loop_scan_finds_header_and_skips_comments() {
         let records = parse_sample();
@@ -1997,6 +2524,22 @@ fn idle() {}\n";
         assert!(outcome.loop_sites[0].display_name.contains("tick"));
     }
 
+    /// Loop scan: the loop records its enclosing function's summed entry
+    /// count (500 + 250), and the report shows the per-call ratio (101.0).
+    #[test]
+    fn loop_site_records_enclosing_function_count() {
+        let records = parse_sample();
+        let mut source_cursor = Cursor::new(SAMPLE_SOURCE.as_bytes());
+        let outcome = scan_source_reader(&mut source_cursor, 0, &records[0]).unwrap();
+        assert_eq!(
+            outcome.loop_sites[0].enclosing_function_entry_count,
+            Some(750)
+        );
+        let report_text = render_text_report(&records, &[], &outcome.loop_sites);
+        assert!(report_text.contains("~101.0 per call of enclosing fn"));
+    }
+
+    /// Keyword detection: accepted loop forms and rejected look-alikes.
     #[test]
     fn loop_keyword_detection_cases() {
         assert_eq!(
@@ -2024,6 +2567,7 @@ fn idle() {}\n";
         assert_eq!(detect_loop_keyword(b"let x = 1;"), None);
     }
 
+    /// LCOV errors: each failure site returns its own unique code.
     #[test]
     fn lcov_errors_have_specific_codes() {
         let mut unterminated = Cursor::new("SF:/abs/a.rs\nDA:1,1\n".as_bytes());
@@ -2064,6 +2608,18 @@ fn idle() {}\n";
         );
     }
 
+    /// Duplicate-name integrity check: two `FN` entries with one name in one
+    /// file are counted (the condition that arises if LCOV is demangled first).
+    #[test]
+    fn duplicate_function_names_are_counted() {
+        let lcov_text = "SF:/abs/a.rs\nFN:1,same\nFN:5,same\nFNDA:3,same\nDA:1,3\nend_of_record\n";
+        let records = parse_lcov_reader(&mut Cursor::new(lcov_text.as_bytes())).unwrap();
+        let (sites, duplicate_function_name_count) = build_function_sites(&records).unwrap();
+        assert_eq!(sites.len(), 2);
+        assert_eq!(duplicate_function_name_count, 1);
+    }
+
+    /// Summary on sorted input: totals, concentration, and decade histogram.
     #[test]
     fn summary_concentration_and_histogram() {
         let mut sites = vec![
@@ -2082,6 +2638,23 @@ fn idle() {}\n";
         assert_eq!(summary.decade_histogram[2], 1); // 90
     }
 
+    /// Regression guard for the POC-1.1 missing-sort bug: unsorted input must
+    /// produce the same concentration as sorted input.
+    /// (Unsorted summarize of [1, 9, 0, 90] would wrongly report 4 sites for 50%.)
+    #[test]
+    fn sort_and_summarize_handles_unsorted_input() {
+        let mut sites = vec![
+            make_site(1, 3),
+            make_site(9, 2),
+            make_site(0, 4),
+            make_site(90, 1),
+        ];
+        let summary = sort_and_summarize_sites(&mut sites).unwrap();
+        assert_eq!(sites[0].execution_count, 90);
+        assert_eq!(summary.sites_reaching_percent, [1, 1, 2]);
+    }
+
+    /// Summary when every count is 0: not an error; concentration is "n/a".
     #[test]
     fn summary_of_all_zero_counts_is_not_an_error() {
         let sites = vec![make_site(0, 1), make_site(0, 2)];
@@ -2090,6 +2663,7 @@ fn idle() {}\n";
         assert_eq!(summary.sites_reaching_percent, [0, 0, 0]);
     }
 
+    /// Custom types reject out-of-range values at construction.
     #[test]
     fn custom_types_enforce_bounds() {
         assert_eq!(
@@ -2111,6 +2685,7 @@ fn idle() {}\n";
         );
     }
 
+    /// Command line: valid flags in any order produce a validated configuration.
     #[test]
     fn cli_parses_valid_arguments() {
         let lcov_path = std::env::temp_dir().join("chm_test_input.lcov");
@@ -2132,6 +2707,7 @@ fn idle() {}\n";
         );
     }
 
+    /// Command line: missing value, unknown flag, and relative path are rejected.
     #[test]
     fn cli_rejects_bad_arguments() {
         let missing_value = vec![OsString::from("bin"), OsString::from("--lcov")];
@@ -2163,6 +2739,7 @@ fn idle() {}\n";
         );
     }
 
+    /// Retry policy is defined per code: only transient open errors retry.
     #[test]
     fn retryability_is_per_code() {
         assert!(HeatmapError::LcovOpenTransient.is_retryable());
@@ -2170,14 +2747,16 @@ fn idle() {}\n";
         assert!(!HeatmapError::AnaCountOverflow.is_retryable());
     }
 
+    /// End-to-end rendering: text report sections present; TSV has one header
+    /// row plus one row per site (2 functions + 1 loop).
     #[test]
     fn text_report_and_tsv_render() {
         let records = parse_sample();
-        let mut function_sites = build_function_sites(&records).unwrap();
-        sort_sites_hottest_first(&mut function_sites);
-        let function_summary = summarize_sorted_sites(&function_sites).unwrap();
-        let loop_sites = vec![make_site(75_750, 3)];
-        let loop_summary = summarize_sorted_sites(&loop_sites).unwrap();
+        let (mut function_sites, _duplicate_function_name_count) =
+            build_function_sites(&records).unwrap();
+        let function_summary = sort_and_summarize_sites(&mut function_sites).unwrap();
+        let mut loop_sites = vec![make_site(75_750, 3)];
+        let loop_summary = sort_and_summarize_sites(&mut loop_sites).unwrap();
         let statistics = LoopScanStatistics::default();
         let report_path = std::env::temp_dir().join("r.txt");
         let tsv_path = std::env::temp_dir().join("s.tsv");
@@ -2193,17 +2772,46 @@ fn idle() {}\n";
             loop_summary: &loop_summary,
             loop_scan_statistics: &statistics,
             top_n_limit: 10,
+            duplicate_function_name_count: 0,
         };
         let mut report_bytes: Vec<u8> = Vec::new();
         write_text_report(&mut report_bytes, &inputs).unwrap();
         let report_text = String::from_utf8(report_bytes).unwrap();
         assert!(report_text.contains("[FUNCTIONS]"));
         assert!(report_text.contains("[LOOPS]"));
+        assert!(report_text.contains("[CO-COUNT GROUPS]"));
         assert!(report_text.contains("2 instances merged"));
 
         let mut tsv_bytes: Vec<u8> = Vec::new();
         write_sites_tsv(&mut tsv_bytes, &inputs).unwrap();
         let tsv_text = String::from_utf8(tsv_bytes).unwrap();
-        assert_eq!(tsv_text.lines().count(), 1 + 2 + 1); // header + 2 functions + 1 loop
+        assert_eq!(tsv_text.lines().count(), 1 + 2 + 1);
+        assert!(
+            tsv_text
+                .lines()
+                .next()
+                .unwrap()
+                .ends_with("\tper_enclosing_call")
+        );
+    }
+
+    /// Co-count groups: two hot groups are found (2 functions; 1 function +
+    /// 1 loop); identical counts below CO_COUNT_MIN_COUNT are ignored.
+    #[test]
+    fn co_count_groups_detect_identical_hot_counts() {
+        let records = parse_sample();
+        let function_sites = vec![
+            make_site(292_014_254, 1),
+            make_site(292_014_254, 2),
+            make_site(5_000_000, 3),
+            make_site(7, 4),
+            make_site(7, 5), // identical but below CO_COUNT_MIN_COUNT: ignored
+        ];
+        let loop_sites = vec![make_site(5_000_000, 9)];
+        let report_text = render_text_report(&records, &function_sites, &loop_sites);
+        assert!(report_text.contains("[CO-COUNT GROUPS]"));
+        assert!(report_text.contains("groups found: 2"));
+        assert!(report_text.contains("count 292014254, 2 sites"));
+        assert!(report_text.contains("count 5000000, 2 sites"));
     }
 }

@@ -8,34 +8,52 @@
 
 /*
 # one-time: third-party tools (unavoidable for v1)
+```bash
 rustup component add llvm-tools-preview
 cargo install cargo-llvm-cov
+cargo install rustfilt
+```
 
 # build the analyzer
 cd /home/YOU/code/code_heatmap_5000 && cargo test && cargo build --release
 
-# smoke test first on a small crate, then Pumpkin:
+# e.g. Pumpkin:
 cd /home/YOU/code/Pumpkin
 cargo llvm-cov clean --workspace
 cargo llvm-cov run --release --no-report --bin pumpkin   # verify bin name for your checkout
 #   ... exercise the server with a written-down scenario + duration,
-#   ... then stop it cleanly (console `stop`) so the .profraw is written
+#   ... then stop it using console `stop`, so the .profraw is written
 cargo llvm-cov report --release --lcov --output-path /home/YOU/heat/pumpkin_run1.lcov
 cargo llvm-cov report --release --lcov --output-path /home/oops/code/code_heatmap_5000/pumpkin_run1.lcov
 
+<pseudo-code>
 /home/YOU/code/code_heatmap_5000/target/release/code_heatmap_5000 \
-  --lcov /home/oops/code/code_heatmap_5000/pumpkin_run1.lcov \
-  --out-dir /home/YOU/heat/run1 \
+  --lcov /home/oops/code/code_heatmap_5000/run_data/pumpkin_run1.lcov \
+  --out-dir /home/YOU/code_heatmap_5000/run_data/run1 \
   --top-n 30
 
+e.g.
+```bash
 cargo run --release -- \
-  --lcov /home/oops/code/code_heatmap_5000/pumpkin_run1.lcov \
-  --out-dir /home/oops/code/code_heatmap_5000/run1 \
+  --lcov /home/oops/code/code_heatmap_5000/run_data/pumpkin_run1.lcov \
+  --out-dir /home/oops/code/code_heatmap_5000/run_data/run1 \
   --top-n 15
-*/
+```
 
-mod code_heatmap_5000;
-use code_heatmap_5000::{USAGE_TEXT, append_error_code_to_log, run_heatmap_cli};
+# demangle .txt and .tsv (NOT .lcov)
+```
+rustfilt < /home/oops/code/code_heatmap_5000/run_data/run1/code_heatmap_5000_report.txt \
+        > /home/oops/code/code_heatmap_5000/run_data/run1/code_heatmap_5000_report.demangled.txt
+```
+```
+rustfilt < /home/oops/code/code_heatmap_5000/run_data/run1/code_heatmap_5000_sites.tsv \
+        > /home/oops/code/code_heatmap_5000/run_data/run1/code_heatmap_5000_sites.demangled.tsv
+```
+
+  */
+
+mod code_heatmap_5000_module;
+use code_heatmap_5000_module::{USAGE_TEXT, append_error_code_to_log, run_heatmap_cli};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
