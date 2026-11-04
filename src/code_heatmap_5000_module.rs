@@ -45,6 +45,18 @@
 //! - Function names may be mangled depending on tool versions; identity is
 //!   `source_path:line`, so counts are unaffected.
 //! - TSV fields are not escaped (paths containing tabs would break columns).
+//! - Over-long source lines (since POC-1.2): a source line longer than
+//!   `MAX_LINE_BYTES` (64 KiB) no longer causes the whole file to be skipped.
+//!   The first 64 KiB of the line are scanned exactly like a normal line (a
+//!   loop keyword or comment marker at the start of the line is still found).
+//!   The rest of the line is read and discarded; while discarding, the scanner
+//!   checks only for a block-comment end `*/`, so comment tracking stays
+//!   correct. The file is skipped only if the discarded remainder of one line
+//!   exceeds `MAX_SKIPPED_LINE_BYTES` (64 MiB). Over-long LCOV lines remain a
+//!   fatal error, because a real LCOV line is always short.
+//! - Block-comment tracking uses "does this line contain `*/`": a line that
+//!   closes one block comment and opens another (`*/ ... /*`) is treated as
+//!   closed. This applies to normal and over-long lines alike.
 //!
 //! ## Modes
 //! - Production-release: never panics; errors are 2-byte `HeatmapError` codes;
@@ -85,8 +97,33 @@ const DEFAULT_TOP_N: u16 = 20;
 /// Upper bound for `--top-n` (keeps the text report human-sized).
 const MAX_TOP_N: u16 = 10_000;
 
-/// Maximum bytes accepted for one line of LCOV or source text.
+/// Maximum bytes kept for one line of text (the newline byte counts too).
+///
+/// - LCOV input: a longer line is a fatal error (`LcovLineTooLong`), because
+///   every real LCOV record line is short; a longer one means corrupt input.
+/// - Source files (loop scan, since POC-1.2): a longer line is NOT an error.
+///   Its first `MAX_LINE_BYTES + 1` bytes are kept and scanned normally (loop
+///   keywords and comment markers sit at the start of a line), and the rest
+///   of the line is read and discarded. See `read_source_line_skipping_overlong`.
 const MAX_LINE_BYTES: usize = 64 * 1024;
+
+/// Source scan only: the longest remainder of one over-long line that the
+/// scanner will read and discard before giving up on that file.
+///
+/// Why a cap exists: discarding is a loop, and every loop in this tool is
+/// bounded. 64 MiB is far above any line expected even in generated source
+/// files. If one line's remainder exceeds it, the file is skipped (Tier 2)
+/// and counted under "files skipped: line > MAX_SKIPPED_LINE_BYTES".
+const MAX_SKIPPED_LINE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Source scan only: extra read calls allowed while discarding, on top of
+/// one call per discarded byte.
+///
+/// Every successful read call discards at least one byte, so the byte cap
+/// already bounds them. Only "interrupted" reads (the operating system asks
+/// the program to try again; nothing is read) use these extra calls. This
+/// keeps the discard loop finite even if a reader reports "interrupted" forever.
+const SKIP_LINE_EXTRA_READ_CALLS: usize = 1024;
 
 /// Maximum number of lines read from one LCOV file.
 const MAX_LCOV_LINES: usize = 50_000_000;
@@ -155,8 +192,13 @@ const CO_COUNT_MIN_COUNT: u64 = 100_000;
 /// | 400–499 | analysis / aggregation                          |
 /// | 500–599 | report output                                   |
 /// | 600–699 | error log                                       |
+// `Debug` (variant names as text) exists only in test and debug builds, so a
+// production-release binary contains no variant-name strings, and any stray
+// `{:?}` on a HeatmapError in production-release code fails to compile.
+// This is an intended guard (see the Modes & Case Handling framework).
+#[cfg_attr(any(test, debug_assertions), derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeatmapError {
     // 100–149: command line
     CliTooManyArguments = 101,
@@ -201,9 +243,11 @@ pub enum HeatmapError {
     SrcOpenTransient = 303,
     SrcOpenOther = 304,
     SrcReadFailed = 305,
-    SrcLineTooLong = 306,
-    SrcTooManyLines = 307,
-    SrcLineNumberOverflow = 308,
+    SrcTooManyLines = 306,
+    SrcLineNumberOverflow = 307,
+    SrcLineExceedsSkipCap = 308,
+    SrcSkipReadFailed = 309,
+    SrcSkipReadCallLimit = 310,
 
     // 400–499: analysis
     AnaCountOverflow = 401,
@@ -282,9 +326,11 @@ impl HeatmapError {
             | HeatmapError::SrcOpenPermissionDenied
             | HeatmapError::SrcOpenOther
             | HeatmapError::SrcReadFailed
-            | HeatmapError::SrcLineTooLong
             | HeatmapError::SrcTooManyLines
             | HeatmapError::SrcLineNumberOverflow
+            | HeatmapError::SrcLineExceedsSkipCap
+            | HeatmapError::SrcSkipReadFailed
+            | HeatmapError::SrcSkipReadCallLimit
             | HeatmapError::AnaCountOverflow
             | HeatmapError::AnaFileIndexInvalid
             | HeatmapError::AnaSiteIndexInvalid
@@ -341,7 +387,7 @@ impl std::fmt::Display for HeatmapError {
             HeatmapError::CliTopNNotUtf8 => "--top-n value is not UTF-8",
             HeatmapError::CliTopNNotANumber => "--top-n value is not a u16 number",
             HeatmapError::CliDuplicateFlag => "a flag was given more than once",
-            HeatmapError::TypeTopNOutOfRange => "top-n must be 1..=10000",
+            HeatmapError::TypeTopNOutOfRange => "top-n outside 1..=MAX_TOP_N",
             HeatmapError::TypeTopNCorrupted => "TopNCount failed validity recheck",
             HeatmapError::TypeLineNumberZero => "source line number must be >= 1",
             HeatmapError::TypeLineNumberCorrupted => "SourceLineNumber failed validity recheck",
@@ -373,9 +419,17 @@ impl std::fmt::Display for HeatmapError {
             }
             HeatmapError::SrcOpenOther => "source file open failed",
             HeatmapError::SrcReadFailed => "source file read failed",
-            HeatmapError::SrcLineTooLong => "source line exceeds MAX_LINE_BYTES",
             HeatmapError::SrcTooManyLines => "source file exceeds MAX_SOURCE_LINES_PER_FILE",
             HeatmapError::SrcLineNumberOverflow => "source line number overflowed u32",
+            HeatmapError::SrcLineExceedsSkipCap => {
+                "over-long source line remainder exceeds MAX_SKIPPED_LINE_BYTES; file skipped"
+            }
+            HeatmapError::SrcSkipReadFailed => {
+                "source read failed while discarding the rest of an over-long line"
+            }
+            HeatmapError::SrcSkipReadCallLimit => {
+                "discarding an over-long source line exceeded its read-call limit"
+            }
             HeatmapError::AnaCountOverflow => "count total overflowed",
             HeatmapError::AnaFileIndexInvalid => "site refers to a missing file record",
             HeatmapError::AnaSiteIndexInvalid => "site index invalid during merge",
@@ -416,8 +470,10 @@ impl TopNCount {
         if candidate_top_n == 0 || candidate_top_n > MAX_TOP_N {
             #[cfg(debug_assertions)]
             eprintln!(
-                "CHM-150: top-n {} outside 1..={}",
-                candidate_top_n, MAX_TOP_N
+                "CHM-{}: top-n {} outside 1..={}",
+                HeatmapError::TypeTopNOutOfRange.code(),
+                candidate_top_n,
+                MAX_TOP_N
             );
             return Err(HeatmapError::TypeTopNOutOfRange);
         }
@@ -430,9 +486,18 @@ impl TopNCount {
     pub fn get(&self) -> Result<u16, HeatmapError> {
         if self.top_n_value == 0 || self.top_n_value > MAX_TOP_N {
             #[cfg(all(debug_assertions, not(test)))]
-            debug_assert!(false, "TopNCount corrupted: {}", self.top_n_value);
+            debug_assert!(
+                false,
+                "CHM-{}: TopNCount corrupted: {}",
+                HeatmapError::TypeTopNCorrupted.code(),
+                self.top_n_value
+            );
             #[cfg(debug_assertions)]
-            eprintln!("CHM-151: TopNCount recheck failed: {}", self.top_n_value);
+            eprintln!(
+                "CHM-{}: TopNCount recheck failed: {}",
+                HeatmapError::TypeTopNCorrupted.code(),
+                self.top_n_value
+            );
             return Err(HeatmapError::TypeTopNCorrupted);
         }
         Ok(self.top_n_value)
@@ -450,7 +515,10 @@ impl SourceLineNumber {
     pub fn new(candidate_line: u32) -> Result<Self, HeatmapError> {
         if candidate_line == 0 {
             #[cfg(debug_assertions)]
-            eprintln!("CHM-152: line number 0 is invalid");
+            eprintln!(
+                "CHM-{}: line number 0 is invalid",
+                HeatmapError::TypeLineNumberZero.code()
+            );
             return Err(HeatmapError::TypeLineNumberZero);
         }
         Ok(Self {
@@ -462,9 +530,16 @@ impl SourceLineNumber {
     pub fn get(&self) -> Result<u32, HeatmapError> {
         if self.line_value == 0 {
             #[cfg(all(debug_assertions, not(test)))]
-            debug_assert!(false, "SourceLineNumber corrupted: 0");
+            debug_assert!(
+                false,
+                "CHM-{}: SourceLineNumber corrupted: 0",
+                HeatmapError::TypeLineNumberCorrupted.code()
+            );
             #[cfg(debug_assertions)]
-            eprintln!("CHM-153: SourceLineNumber recheck failed");
+            eprintln!(
+                "CHM-{}: SourceLineNumber recheck failed",
+                HeatmapError::TypeLineNumberCorrupted.code()
+            );
             return Err(HeatmapError::TypeLineNumberCorrupted);
         }
         Ok(self.line_value)
@@ -482,7 +557,11 @@ impl AbsolutePath {
     pub fn new(candidate_path: PathBuf) -> Result<Self, HeatmapError> {
         if !candidate_path.is_absolute() {
             #[cfg(debug_assertions)]
-            eprintln!("CHM-154: not absolute: {}", candidate_path.display());
+            eprintln!(
+                "CHM-{}: not absolute: {}",
+                HeatmapError::TypePathNotAbsolute.code(),
+                candidate_path.display()
+            );
             return Err(HeatmapError::TypePathNotAbsolute);
         }
         Ok(Self {
@@ -494,9 +573,16 @@ impl AbsolutePath {
     pub fn get(&self) -> Result<&Path, HeatmapError> {
         if !self.absolute_path.is_absolute() {
             #[cfg(all(debug_assertions, not(test)))]
-            debug_assert!(false, "AbsolutePath corrupted");
+            debug_assert!(
+                false,
+                "CHM-{}: AbsolutePath corrupted",
+                HeatmapError::TypePathCorrupted.code()
+            );
             #[cfg(debug_assertions)]
-            eprintln!("CHM-155: AbsolutePath recheck failed");
+            eprintln!(
+                "CHM-{}: AbsolutePath recheck failed",
+                HeatmapError::TypePathCorrupted.code()
+            );
             return Err(HeatmapError::TypePathCorrupted);
         }
         Ok(self.absolute_path.as_path())
@@ -579,29 +665,71 @@ impl LoopKeyword {
     }
 }
 
-/// Transparency counters for the loop scan (reported in the provenance block).
-/// Skip reasons are split so that no file is silently unexplained.
+/// Transparency counters for the loop scan (reported in the
+/// `[loop-scan coverage]` block of the text report).
+///
+/// Every source file listed in the LCOV is counted exactly once: either as
+/// scanned, or under exactly one skip reason. No file is silently unexplained.
 #[derive(Debug, Default, Clone, Copy)]
 struct LoopScanStatistics {
+    /// Source files listed in the LCOV.
     files_total: usize,
+    /// Files read to the end and searched for loop headers.
     files_scanned: usize,
+    /// Files skipped because every line count is 0 (cannot contain a hot loop).
     files_skipped_cold: usize,
+    /// Files skipped because the LCOV path is not absolute.
     files_skipped_non_absolute_path: usize,
+    /// Files skipped because they no longer exist at the LCOV path.
     files_skipped_not_found: usize,
+    /// Files skipped because they could not be opened (permissions).
     files_skipped_permission_denied: usize,
-    files_skipped_line_too_long: usize,
+    /// Files abandoned because one line's discarded remainder exceeded
+    /// `MAX_SKIPPED_LINE_BYTES`. Replaces POC-1.1's `files_skipped_line_too_long`,
+    /// which skipped a whole file for any line over `MAX_LINE_BYTES`.
+    files_skipped_line_exceeds_skip_cap: usize,
+    /// Files abandoned because they exceed `MAX_SOURCE_LINES_PER_FILE`.
     files_skipped_too_many_lines: usize,
+    /// Files abandoned for any other reason (read failures and similar).
     files_skipped_other_error: usize,
+    /// Scanned files that contain at least one over-long line.
+    files_with_overlong_source_lines: usize,
+    /// Over-long lines across all scanned files (start scanned, rest discarded).
+    overlong_source_lines_total: usize,
+    /// Loop headers found by the lexical scan, with or without a line count.
     loop_headers_found: usize,
+    /// Loop headers whose line has no LCOV `DA` count (not instrumented,
+    /// compiled out, or a lexical false positive).
     loop_headers_without_line_data: usize,
 }
 
 /// Result of scanning one source file.
 #[derive(Debug, Default)]
 struct SourceScanOutcome {
+    /// Loop sites found in this file (only headers with a line count).
     loop_sites: Vec<HeatSite>,
+    /// Loop headers found, with or without a line count.
     loop_headers_found: usize,
+    /// Loop headers whose line has no LCOV `DA` count.
     loop_headers_without_line_data: usize,
+    /// Lines longer than `MAX_LINE_BYTES` in this file (start scanned, rest discarded).
+    overlong_lines_found: usize,
+}
+
+/// What `read_source_line_skipping_overlong` found when reading one line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceLineReadOutcome {
+    /// No more lines: the file has been read to the end.
+    EndOfInput,
+    /// A whole line (at most `MAX_LINE_BYTES` bytes) is in the line buffer.
+    CompleteLine,
+    /// The line was longer than `MAX_LINE_BYTES`. The line buffer holds its
+    /// first `MAX_LINE_BYTES + 1` bytes; the rest has been read and discarded.
+    OverLongLineStartKept {
+        /// True if a block-comment end `*/` occurred in the discarded part,
+        /// including a `*/` split between the kept start and the discarded part.
+        discarded_part_contains_block_comment_end: bool,
+    },
 }
 
 /// Summary statistics for one kind of site (functions or loops).
@@ -623,7 +751,10 @@ enum FileOpenPurpose {
 }
 
 /// Per-call-site error codes for file opening, so each site keeps unique codes.
-#[derive(Debug, Clone, Copy)]
+///
+/// No `Debug` derive: the fields are `HeatmapError` values, which have no
+/// `Debug` in production-release builds (no variant-name strings ship).
+#[derive(Clone, Copy)]
 struct OpenErrorCodes {
     not_found: HeatmapError,
     permission_denied: HeatmapError,
@@ -688,7 +819,11 @@ pub fn append_error_code_to_log(error_code: HeatmapError) -> Result<(), HeatmapE
         Ok(path) => path,
         Err(_io_error) => {
             #[cfg(debug_assertions)]
-            eprintln!("CHM-601: current_exe failed: {}", _io_error);
+            eprintln!(
+                "CHM-{}: current_exe failed: {}",
+                HeatmapError::LogExecutablePathUnavailable.code(),
+                _io_error
+            );
             return Err(HeatmapError::LogExecutablePathUnavailable);
         }
     };
@@ -711,7 +846,11 @@ pub fn append_error_code_to_log(error_code: HeatmapError) -> Result<(), HeatmapE
         Ok(file) => file,
         Err(_io_error) => {
             #[cfg(debug_assertions)]
-            eprintln!("CHM-603: error log open failed: {}", _io_error);
+            eprintln!(
+                "CHM-{}: error log open failed: {}",
+                HeatmapError::LogOpenFailed.code(),
+                _io_error
+            );
             return Err(HeatmapError::LogOpenFailed);
         }
     };
@@ -725,7 +864,11 @@ pub fn append_error_code_to_log(error_code: HeatmapError) -> Result<(), HeatmapE
         Ok(()) => Ok(()),
         Err(_io_error) => {
             #[cfg(debug_assertions)]
-            eprintln!("CHM-604: error log write failed: {}", _io_error);
+            eprintln!(
+                "CHM-{}: error log write failed: {}",
+                HeatmapError::LogWriteFailed.code(),
+                _io_error
+            );
             Err(HeatmapError::LogWriteFailed)
         }
     }
@@ -816,7 +959,11 @@ fn run_heatmap_with_configuration(
     // Step 5: write files, then stdout.
     if let Err(_io_error) = fs::create_dir_all(output_directory_path) {
         #[cfg(debug_assertions)]
-        eprintln!("CHM-501: create_dir_all failed: {}", _io_error);
+        eprintln!(
+            "CHM-{}: create_dir_all failed: {}",
+            HeatmapError::RptCreateDirectoryFailed.code(),
+            _io_error
+        );
         return Err(HeatmapError::RptCreateDirectoryFailed);
     }
     write_bytes_to_new_file(&report_file_path, &report_bytes)?;
@@ -826,12 +973,20 @@ fn run_heatmap_with_configuration(
     let mut standard_output_lock = standard_output.lock();
     if let Err(_io_error) = standard_output_lock.write_all(&report_bytes) {
         #[cfg(debug_assertions)]
-        eprintln!("CHM-509: stdout write failed: {}", _io_error);
+        eprintln!(
+            "CHM-{}: stdout write failed: {}",
+            HeatmapError::RptStdoutWriteFailed.code(),
+            _io_error
+        );
         return Err(HeatmapError::RptStdoutWriteFailed);
     }
     if let Err(_io_error) = standard_output_lock.flush() {
         #[cfg(debug_assertions)]
-        eprintln!("CHM-509: stdout flush failed: {}", _io_error);
+        eprintln!(
+            "CHM-{}: stdout flush failed: {}",
+            HeatmapError::RptStdoutWriteFailed.code(),
+            _io_error
+        );
         return Err(HeatmapError::RptStdoutWriteFailed);
     }
     Ok(())
@@ -891,14 +1046,22 @@ where
                     Ok(parsed_top_n) => top_n_argument = Some(parsed_top_n),
                     Err(_parse_error) => {
                         #[cfg(debug_assertions)]
-                        eprintln!("CHM-107: --top-n parse failed: {}", _parse_error);
+                        eprintln!(
+                            "CHM-{}: --top-n parse failed: {}",
+                            HeatmapError::CliTopNNotANumber.code(),
+                            _parse_error
+                        );
                         return Err(HeatmapError::CliTopNNotANumber);
                     }
                 }
             }
             _ => {
                 #[cfg(debug_assertions)]
-                eprintln!("CHM-102: unknown flag: {:?}", flag_argument);
+                eprintln!(
+                    "CHM-{}: unknown flag: {:?}",
+                    HeatmapError::CliUnknownFlag.code(),
+                    flag_argument
+                );
                 return Err(HeatmapError::CliUnknownFlag);
             }
         }
@@ -985,12 +1148,20 @@ fn write_bytes_to_new_file(file_path: &Path, file_bytes: &[u8]) -> Result<(), He
     )?;
     if let Err(_io_error) = output_file.write_all(file_bytes) {
         #[cfg(debug_assertions)]
-        eprintln!("CHM-507: write failed: {}", _io_error);
+        eprintln!(
+            "CHM-{}: write failed: {}",
+            HeatmapError::RptFileWriteFailed.code(),
+            _io_error
+        );
         return Err(HeatmapError::RptFileWriteFailed);
     }
     if let Err(_io_error) = output_file.flush() {
         #[cfg(debug_assertions)]
-        eprintln!("CHM-508: flush failed: {}", _io_error);
+        eprintln!(
+            "CHM-{}: flush failed: {}",
+            HeatmapError::RptFlushFailed.code(),
+            _io_error
+        );
         return Err(HeatmapError::RptFlushFailed);
     }
     Ok(())
@@ -1032,6 +1203,207 @@ fn read_bounded_line<R: BufRead>(
     }
 }
 
+/// Reads one source-file line for the loop scan. A line longer than
+/// `MAX_LINE_BYTES` is NOT an error: its start is kept and its rest discarded.
+///
+/// # Project context
+/// Some files in large projects are generated, with whole data tables written
+/// on one line. In POC-1.1 one such line made the scanner skip the entire
+/// file, so every loop in it became invisible (4 files in Pumpkin run 1).
+/// The loop scan only ever looks at the *start* of a line (loop keywords,
+/// `//`, `/*`), so keeping the start and discarding the rest loses nothing
+/// the scan uses. The LCOV parser does not use this function: an over-long
+/// LCOV line still means a corrupt file and stays fatal.
+///
+/// # Steps
+/// 1. Read up to `MAX_LINE_BYTES + 1` bytes, stopping after a newline.
+/// 2. 0 bytes: end of file. At most `MAX_LINE_BYTES` bytes: a complete line.
+/// 3. More than `MAX_LINE_BYTES` bytes: an over-long line.
+///    - If the last byte kept is the newline, the line has already ended
+///      (it was exactly one byte too long). Nothing is discarded. Discarding
+///      here would destroy the next line and shift every later line number.
+///    - Otherwise discard up to and including the next newline (or end of
+///      file) with `discard_rest_of_source_line`, checking for `*/`.
+///
+/// # Arguments
+/// - `reader`: buffered source text (a file in production, a `Cursor` in tests).
+/// - `line_buffer`: cleared, then filled with the line (or the line's start).
+/// - `skip_cap_bytes`: maximum discarded remainder per line. Production passes
+///   `MAX_SKIPPED_LINE_BYTES`; tests pass small values.
+///
+/// # Returns
+/// - `Ok(SourceLineReadOutcome)`: see the enum for each case.
+/// - `Err(SrcReadFailed)`: reading the line (or its start) failed.
+/// - `Err(SrcLineExceedsSkipCap | SrcSkipReadFailed | SrcSkipReadCallLimit)`:
+///   from `discard_rest_of_source_line`.
+///
+/// All errors are absorbed per file at Tier 2 by `scan_all_files_for_loops`.
+///
+/// # Modes
+/// Debug builds print one diagnostic line per over-long line (no path).
+fn read_source_line_skipping_overlong<R: BufRead>(
+    reader: &mut R,
+    line_buffer: &mut Vec<u8>,
+    skip_cap_bytes: usize,
+) -> Result<SourceLineReadOutcome, HeatmapError> {
+    line_buffer.clear();
+    let read_limit = (MAX_LINE_BYTES as u64).saturating_add(1);
+    let kept_byte_count = {
+        let mut limited_reader = Read::take(&mut *reader, read_limit);
+        match limited_reader.read_until(b'\n', line_buffer) {
+            Ok(bytes_read) => bytes_read,
+            Err(_io_error) => {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "CHM-{}: source read failed: {}",
+                    HeatmapError::SrcReadFailed.code(),
+                    _io_error
+                );
+                return Err(HeatmapError::SrcReadFailed);
+            }
+        }
+    };
+
+    if kept_byte_count == 0 {
+        return Ok(SourceLineReadOutcome::EndOfInput);
+    }
+    if kept_byte_count <= MAX_LINE_BYTES {
+        return Ok(SourceLineReadOutcome::CompleteLine);
+    }
+
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "source line exceeds {} bytes: scanning its start, discarding the rest",
+        MAX_LINE_BYTES
+    );
+
+    // The line ended exactly at the limit: nothing left to discard.
+    if line_buffer.last() == Some(&b'\n') {
+        return Ok(SourceLineReadOutcome::OverLongLineStartKept {
+            discarded_part_contains_block_comment_end: false,
+        });
+    }
+
+    // A `*` at the very end of the kept start may pair with a `/` at the very
+    // beginning of the discarded part to form `*/`.
+    let kept_part_ended_with_star = line_buffer.last() == Some(&b'*');
+    let discarded_part_contains_block_comment_end =
+        discard_rest_of_source_line(reader, kept_part_ended_with_star, skip_cap_bytes)?;
+    Ok(SourceLineReadOutcome::OverLongLineStartKept {
+        discarded_part_contains_block_comment_end,
+    })
+}
+
+/// Reads and discards the rest of the current line, up to and including the
+/// next newline (or end of file), and reports whether it contained `*/`.
+///
+/// # Project context
+/// Used only for over-long source lines (see `read_source_line_skipping_overlong`).
+/// The discarded bytes are never stored, so memory use stays constant no
+/// matter how long the line is. The `*/` check keeps block-comment tracking
+/// correct when a comment ends inside the discarded part.
+///
+/// # Steps (bounded loop)
+/// 1. Ask the reader for its next chunk of buffered bytes (`fill_buf`).
+///    - "Interrupted": try again (uses the extra read-call allowance).
+///    - Empty chunk: end of file, so the line is finished.
+/// 2. Take the chunk up to and including the first newline, or the whole
+///    chunk if it has no newline.
+/// 3. Check those bytes for `*/`, carrying "previous byte was `*`" across
+///    chunks so a `*/` split between two chunks is still seen.
+/// 4. Mark those bytes as consumed, and add them to the discarded total.
+/// 5. If the total exceeds `skip_cap_bytes`: error. If a newline was
+///    reached: done. Otherwise repeat.
+///
+/// The cap check comes before the newline check, so the result depends only
+/// on the length of the remainder, not on how the reader splits it into chunks.
+///
+/// # Arguments
+/// - `reader`: positioned just after the kept start of the over-long line.
+/// - `kept_part_ended_with_star`: true if the last kept byte was `*`.
+/// - `skip_cap_bytes`: maximum bytes to discard.
+///
+/// # Returns
+/// - `Ok(true)` if `*/` occurred in the discarded part (or across the
+///   kept/discarded boundary); `Ok(false)` otherwise.
+/// - `Err(SrcSkipReadFailed)`: a read failed (other than "interrupted").
+/// - `Err(SrcLineExceedsSkipCap)`: the remainder is longer than `skip_cap_bytes`.
+/// - `Err(SrcSkipReadCallLimit)`: the read-call bound was reached (only
+///   possible with endlessly interrupted reads; a safety bound).
+fn discard_rest_of_source_line<R: BufRead>(
+    reader: &mut R,
+    kept_part_ended_with_star: bool,
+    skip_cap_bytes: usize,
+) -> Result<bool, HeatmapError> {
+    // Each successful read call discards at least one byte, and the cap check
+    // stops the loop once more than `skip_cap_bytes` have been discarded, so
+    // at most `skip_cap_bytes + 1` successful calls occur. Interrupted calls
+    // discard nothing and are covered by the extra allowance.
+    let maximum_read_calls = skip_cap_bytes
+        .saturating_add(1)
+        .saturating_add(SKIP_LINE_EXTRA_READ_CALLS);
+    let mut previous_byte_was_star = kept_part_ended_with_star;
+    let mut block_comment_end_seen = false;
+    let mut discarded_byte_count: usize = 0;
+
+    for _read_call_index in 0..maximum_read_calls {
+        let available_bytes = match reader.fill_buf() {
+            Ok(bytes) => bytes,
+            Err(io_error) if io_error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_io_error) => {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "CHM-{}: read failed while discarding over-long line: {}",
+                    HeatmapError::SrcSkipReadFailed.code(),
+                    _io_error
+                );
+                return Err(HeatmapError::SrcSkipReadFailed);
+            }
+        };
+        if available_bytes.is_empty() {
+            // End of file inside the over-long line: the line is finished.
+            return Ok(block_comment_end_seen);
+        }
+
+        let (consume_length, line_ended) =
+            match available_bytes.iter().position(|byte| *byte == b'\n') {
+                Some(newline_index) => (newline_index.saturating_add(1), true),
+                None => (available_bytes.len(), false),
+            };
+
+        for &byte in available_bytes.iter().take(consume_length) {
+            if previous_byte_was_star && byte == b'/' {
+                block_comment_end_seen = true;
+            }
+            previous_byte_was_star = byte == b'*';
+        }
+
+        reader.consume(consume_length);
+        discarded_byte_count = discarded_byte_count.saturating_add(consume_length);
+
+        if discarded_byte_count > skip_cap_bytes {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "CHM-{}: over-long line remainder exceeds {} bytes; skipping file",
+                HeatmapError::SrcLineExceedsSkipCap.code(),
+                skip_cap_bytes
+            );
+            return Err(HeatmapError::SrcLineExceedsSkipCap);
+        }
+        if line_ended {
+            return Ok(block_comment_end_seen);
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "CHM-{}: discard read-call limit {} reached",
+        HeatmapError::SrcSkipReadCallLimit.code(),
+        maximum_read_calls
+    );
+    Err(HeatmapError::SrcSkipReadCallLimit)
+}
+
 // ============================================================================
 // LCOV parsing
 // ============================================================================
@@ -1058,7 +1430,11 @@ fn parse_lcov_reader<R: BufRead>(reader: &mut R) -> Result<Vec<FileCoverageRecor
             Ok(text) => text.trim_end(),
             Err(_utf8_error) => {
                 #[cfg(debug_assertions)]
-                eprintln!("CHM-208: lcov line not UTF-8: {}", _utf8_error);
+                eprintln!(
+                    "CHM-{}: lcov line not UTF-8: {}",
+                    HeatmapError::LcovNotUtf8.code(),
+                    _utf8_error
+                );
                 return Err(HeatmapError::LcovNotUtf8);
             }
         };
@@ -1186,7 +1562,12 @@ fn parse_lcov_line_number(line_text: &str) -> Result<SourceLineNumber, HeatmapEr
         Ok(value) => value,
         Err(_parse_error) => {
             #[cfg(debug_assertions)]
-            eprintln!("CHM-210: bad line number {:?}: {}", line_text, _parse_error);
+            eprintln!(
+                "CHM-{}: bad line number {:?}: {}",
+                HeatmapError::LcovBadLineNumber.code(),
+                line_text,
+                _parse_error
+            );
             return Err(HeatmapError::LcovBadLineNumber);
         }
     };
@@ -1202,7 +1583,12 @@ fn parse_lcov_count(count_text: &str) -> Result<u64, HeatmapError> {
         Ok(count) => Ok(count),
         Err(_parse_error) => {
             #[cfg(debug_assertions)]
-            eprintln!("CHM-211: bad count {:?}: {}", count_text, _parse_error);
+            eprintln!(
+                "CHM-{}: bad count {:?}: {}",
+                HeatmapError::LcovBadCount.code(),
+                count_text,
+                _parse_error
+            );
             Err(HeatmapError::LcovBadCount)
         }
     }
@@ -1270,7 +1656,18 @@ fn build_function_sites(
                         Some(site) => site,
                         None => {
                             #[cfg(all(debug_assertions, not(test)))]
-                            debug_assert!(false, "site index {} invalid", existing_site_index);
+                            debug_assert!(
+                                false,
+                                "CHM-{}: site index {} invalid",
+                                HeatmapError::AnaSiteIndexInvalid.code(),
+                                existing_site_index
+                            );
+                            #[cfg(debug_assertions)]
+                            eprintln!(
+                                "CHM-{}: site index {} invalid",
+                                HeatmapError::AnaSiteIndexInvalid.code(),
+                                existing_site_index
+                            );
                             return Err(HeatmapError::AnaSiteIndexInvalid);
                         }
                     };
@@ -1304,8 +1701,34 @@ fn build_function_sites(
 // Loop sites (lexical scan, no AST)
 // ============================================================================
 
-/// Scans every non-cold source file for loop headers.
-/// Tier 2: a file that cannot be scanned is skipped and counted; never fatal.
+/// Scans every non-cold source file for loop headers and collects LOOP sites.
+///
+/// # Project context
+/// This is the "prioritization step" plus the per-file loop scan. A file
+/// whose every LCOV line count is 0 cannot contain a hot loop, so it is
+/// skipped without being opened (61% of files in Pumpkin run 1). This is how
+/// the tool stays fast on very large codebases.
+///
+/// # Steps (per source file listed in the LCOV)
+/// 1. Count the file in `files_total`.
+/// 2. Skip it if it is cold (every line count is 0).
+/// 3. Skip it if its LCOV path is not absolute.
+/// 4. Otherwise open and scan it (`scan_one_source_file`).
+///    - Success: add its loop sites and counters, including over-long lines.
+///    - Failure (Tier 2): skip the file, count the reason, continue.
+///
+/// # Arguments
+/// - `records`: parsed LCOV records, one per source file.
+///
+/// # Returns
+/// `(loop_sites, statistics)`. Never fails: per-file problems are absorbed
+/// and counted, so one unreadable file cannot stop the whole analysis.
+/// Loop sites are in file order (NOT sorted): pass them to
+/// `sort_and_summarize_sites`.
+///
+/// # Modes
+/// Debug builds print the path and error for each skipped file. Production
+/// builds print nothing; the counts appear in the report.
 fn scan_all_files_for_loops(records: &[FileCoverageRecord]) -> (Vec<HeatSite>, LoopScanStatistics) {
     let mut all_loop_sites: Vec<HeatSite> = Vec::new();
     let mut scan_statistics = LoopScanStatistics::default();
@@ -1340,6 +1763,14 @@ fn scan_all_files_for_loops(records: &[FileCoverageRecord]) -> (Vec<HeatSite>, L
                 scan_statistics.loop_headers_without_line_data = scan_statistics
                     .loop_headers_without_line_data
                     .saturating_add(scan_outcome.loop_headers_without_line_data);
+                scan_statistics.overlong_source_lines_total = scan_statistics
+                    .overlong_source_lines_total
+                    .saturating_add(scan_outcome.overlong_lines_found);
+                if scan_outcome.overlong_lines_found > 0 {
+                    scan_statistics.files_with_overlong_source_lines = scan_statistics
+                        .files_with_overlong_source_lines
+                        .saturating_add(1);
+                }
                 all_loop_sites.extend(scan_outcome.loop_sites);
             }
             Err(scan_error) => {
@@ -1359,9 +1790,9 @@ fn scan_all_files_for_loops(records: &[FileCoverageRecord]) -> (Vec<HeatSite>, L
                             .files_skipped_permission_denied
                             .saturating_add(1);
                     }
-                    HeatmapError::SrcLineTooLong => {
-                        scan_statistics.files_skipped_line_too_long = scan_statistics
-                            .files_skipped_line_too_long
+                    HeatmapError::SrcLineExceedsSkipCap => {
+                        scan_statistics.files_skipped_line_exceeds_skip_cap = scan_statistics
+                            .files_skipped_line_exceeds_skip_cap
                             .saturating_add(1);
                     }
                     HeatmapError::SrcTooManyLines => {
@@ -1405,15 +1836,23 @@ fn scan_one_source_file(
 /// approximates the number of iterations, which is what makes a loop hot
 /// even inside a rarely called function.
 ///
-/// # Per detected loop header
-/// 1. Skip comment lines (`//` lines; `/* ... */` blocks that start a line).
-/// 2. Detect `for` / `while` / `loop` (optionally labeled) at line start.
-/// 3. Look up the line's `DA` count. If there is none (not instrumented,
+/// # Per line
+/// 1. Read the line with `read_source_line_skipping_overlong`. An over-long
+///    line (more than `MAX_LINE_BYTES`) is counted in `overlong_lines_found`;
+///    its kept start is then handled exactly like a normal line, so a loop
+///    header at the start of a very long line is still found.
+/// 2. Skip comment lines (`//` lines; `/* ... */` blocks that start a line).
+///    For over-long lines, a `*/` in the discarded part also counts as the
+///    end of the comment.
+/// 3. Detect `for` / `while` / `loop` (optionally labeled) at line start.
+/// 4. Look up the line's `DA` count. If there is none (not instrumented,
 ///    cfg'd out, or a lexical false positive), the header is counted in
 ///    `loop_headers_without_line_data` and skipped.
-/// 4. Attribute the loop to the nearest preceding function definition line
+/// 5. Attribute the loop to the nearest preceding function definition line
 ///    (see `find_enclosing_function`). Store that function's summed entry
 ///    count, which the report uses for "iterations per call".
+///
+/// Line numbers stay exact: every line counts as one line, over-long or not.
 ///
 /// # Arguments
 /// - `source_reader`: buffered source text (a file in production, a `Cursor` in tests).
@@ -1422,10 +1861,11 @@ fn scan_one_source_file(
 ///
 /// # Returns
 /// - `Ok(SourceScanOutcome)`: loop sites plus transparency counters.
-/// - `Err(SrcReadFailed | SrcLineTooLong | SrcTooManyLines |
-///   SrcLineNumberOverflow | AnaFunctionLineIndexOverflow | TypeLineNumberZero)`.
-///   The caller (`scan_all_files_for_loops`) absorbs these at Tier 2: the
-///   file is skipped, the reason is counted, and the analysis continues.
+/// - `Err(SrcReadFailed | SrcLineExceedsSkipCap | SrcSkipReadFailed |
+///   SrcSkipReadCallLimit | SrcTooManyLines | SrcLineNumberOverflow |
+///   AnaFunctionLineIndexOverflow | TypeLineNumberZero)`. The caller
+///   (`scan_all_files_for_loops`) absorbs these at Tier 2: the file is
+///   skipped, the reason is counted, and the analysis continues.
 fn scan_source_reader<R: BufRead>(
     source_reader: &mut R,
     file_index: usize,
@@ -1438,20 +1878,29 @@ fn scan_source_reader<R: BufRead>(
     let mut inside_block_comment = false;
 
     for line_index in 0..MAX_SOURCE_LINES_PER_FILE {
-        let bytes_read = read_bounded_line(
+        let read_outcome = read_source_line_skipping_overlong(
             source_reader,
             &mut line_buffer,
-            HeatmapError::SrcReadFailed,
-            HeatmapError::SrcLineTooLong,
+            MAX_SKIPPED_LINE_BYTES,
         )?;
-        if bytes_read == 0 {
-            return Ok(scan_outcome);
-        }
+        // For complete lines nothing was discarded, so this is false.
+        let discarded_part_contains_block_comment_end = match read_outcome {
+            SourceLineReadOutcome::EndOfInput => return Ok(scan_outcome),
+            SourceLineReadOutcome::CompleteLine => false,
+            SourceLineReadOutcome::OverLongLineStartKept {
+                discarded_part_contains_block_comment_end,
+            } => {
+                scan_outcome.overlong_lines_found =
+                    scan_outcome.overlong_lines_found.saturating_add(1);
+                discarded_part_contains_block_comment_end
+            }
+        };
         let trimmed_line = trim_ascii_whitespace_start(&line_buffer);
 
         // Crude comment handling (documented limitation: `/*` must start a line).
         if inside_block_comment {
-            if contains_block_comment_end(trimmed_line) {
+            if contains_block_comment_end(trimmed_line) || discarded_part_contains_block_comment_end
+            {
                 inside_block_comment = false;
             }
             continue;
@@ -1461,7 +1910,9 @@ fn scan_source_reader<R: BufRead>(
         }
         if trimmed_line.starts_with(b"/*") {
             let after_opener = trimmed_line.get(2..).unwrap_or(&[]);
-            if !contains_block_comment_end(after_opener) {
+            if !(contains_block_comment_end(after_opener)
+                || discarded_part_contains_block_comment_end)
+            {
                 inside_block_comment = true;
             }
             continue;
@@ -1835,7 +2286,11 @@ fn percent_of_site_count(part: usize, whole: usize) -> f64 {
 /// Maps an in-memory report write failure to its code (debug detail only).
 fn report_buffer_write_error(_io_error: std::io::Error) -> HeatmapError {
     #[cfg(debug_assertions)]
-    eprintln!("CHM-506: report buffer write failed: {}", _io_error);
+    eprintln!(
+        "CHM-{}: report buffer write failed: {}",
+        HeatmapError::RptBufferWriteFailed.code(),
+        _io_error
+    );
     HeatmapError::RptBufferWriteFailed
 }
 
@@ -1848,14 +2303,48 @@ fn lookup_source_path(
         Some(record) => Ok(record.source_path_text.as_str()),
         None => {
             #[cfg(all(debug_assertions, not(test)))]
-            debug_assert!(false, "file index {} invalid", file_index);
+            debug_assert!(
+                false,
+                "CHM-{}: file index {} invalid",
+                HeatmapError::AnaFileIndexInvalid.code(),
+                file_index
+            );
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "CHM-{}: file index {} invalid",
+                HeatmapError::AnaFileIndexInvalid.code(),
+                file_index
+            );
             Err(HeatmapError::AnaFileIndexInvalid)
         }
     }
 }
 
-/// Writes the human-readable report: provenance, loop-scan coverage, the
-/// FUNCTIONS and LOOPS sections, then co-count groups.
+/// Writes the human-readable text report.
+///
+/// # Project context
+/// The report is meant to be read by a person deciding where to look in a
+/// large codebase. It therefore starts with provenance (what was measured,
+/// how, and what was left out) before any numbers, so every figure can be
+/// traced back to its method and its known limitations.
+///
+/// # Sections, in order
+/// 1. Title (states the phase: POC-1.2).
+/// 2. `[provenance]`: input and output paths, measurement method, meaning of
+///    each count, loop-detection method, over-long-line handling, and
+///    integrity counters.
+/// 3. `[loop-scan coverage]`: every LCOV source file counted as scanned or
+///    under exactly one skip reason, plus over-long-line and loop-header counters.
+/// 4. `[FUNCTIONS]` and `[LOOPS]` (see `write_heat_kind_section`).
+/// 5. `[CO-COUNT GROUPS]` (see `write_co_count_groups`).
+///
+/// # Arguments
+/// - `report_writer`: in-memory report buffer.
+/// - `inputs`: all report data.
+///
+/// # Returns
+/// - `Ok(())`.
+/// - `Err(RptBufferWriteFailed)`, or an error code propagated from a section writer.
 fn write_text_report<W: Write>(
     report_writer: &mut W,
     inputs: &ReportInputs,
@@ -1863,7 +2352,7 @@ fn write_text_report<W: Write>(
     let stats = inputs.loop_scan_statistics;
     writeln!(
         report_writer,
-        "code_heatmap_5000 :: POC-1.1 count-heat report"
+        "code_heatmap_5000 :: POC-1.2 count-heat report"
     )
     .map_err(report_buffer_write_error)?;
     writeln!(
@@ -1903,6 +2392,12 @@ fn write_text_report<W: Write>(
     )
     .map_err(report_buffer_write_error)?;
     writeln!(
+            report_writer,
+            "  over-long source lines  : first MAX_LINE_BYTES ({} bytes) scanned like a normal line; rest read and discarded (not an error)",
+            MAX_LINE_BYTES
+        )
+        .map_err(report_buffer_write_error)?;
+    writeln!(
         report_writer,
         "  time-heat               : NOT measured in POC-1.x"
     )
@@ -1915,65 +2410,78 @@ fn write_text_report<W: Write>(
     .map_err(report_buffer_write_error)?;
     writeln!(report_writer, "  duplicate FN names      : {}  (expected 0; nonzero = names collapsed before parsing, function counts may be double-counted)", inputs.duplicate_function_name_count).map_err(report_buffer_write_error)?;
     writeln!(report_writer).map_err(report_buffer_write_error)?;
+
     writeln!(report_writer, "[loop-scan coverage]").map_err(report_buffer_write_error)?;
     writeln!(
         report_writer,
-        "  files scanned                              : {}",
-        stats.files_scanned
+        "  {:<46}: {}",
+        "files scanned", stats.files_scanned
     )
     .map_err(report_buffer_write_error)?;
     writeln!(
         report_writer,
-        "  files skipped: cold (every line count = 0) : {}",
-        stats.files_skipped_cold
+        "  {:<46}: {}",
+        "files skipped: cold (every line count = 0)", stats.files_skipped_cold
     )
     .map_err(report_buffer_write_error)?;
     writeln!(
         report_writer,
-        "  files skipped: path not absolute           : {}",
-        stats.files_skipped_non_absolute_path
+        "  {:<46}: {}",
+        "files skipped: path not absolute", stats.files_skipped_non_absolute_path
     )
     .map_err(report_buffer_write_error)?;
     writeln!(
         report_writer,
-        "  files skipped: not found                   : {}",
-        stats.files_skipped_not_found
+        "  {:<46}: {}",
+        "files skipped: not found", stats.files_skipped_not_found
     )
     .map_err(report_buffer_write_error)?;
     writeln!(
         report_writer,
-        "  files skipped: permission denied           : {}",
-        stats.files_skipped_permission_denied
+        "  {:<46}: {}",
+        "files skipped: permission denied", stats.files_skipped_permission_denied
     )
     .map_err(report_buffer_write_error)?;
     writeln!(
         report_writer,
-        "  files skipped: line > MAX_LINE_BYTES       : {}",
-        stats.files_skipped_line_too_long
+        "  {:<46}: {}",
+        "files skipped: line > MAX_SKIPPED_LINE_BYTES", stats.files_skipped_line_exceeds_skip_cap
     )
     .map_err(report_buffer_write_error)?;
     writeln!(
         report_writer,
-        "  files skipped: too many lines              : {}",
-        stats.files_skipped_too_many_lines
+        "  {:<46}: {}",
+        "files skipped: too many lines", stats.files_skipped_too_many_lines
     )
     .map_err(report_buffer_write_error)?;
     writeln!(
         report_writer,
-        "  files skipped: other error                 : {}",
-        stats.files_skipped_other_error
+        "  {:<46}: {}",
+        "files skipped: other error", stats.files_skipped_other_error
     )
     .map_err(report_buffer_write_error)?;
     writeln!(
         report_writer,
-        "  loop headers found                         : {}",
-        stats.loop_headers_found
+        "  {:<46}: {}",
+        "files with over-long lines (> MAX_LINE_BYTES)", stats.files_with_overlong_source_lines
     )
     .map_err(report_buffer_write_error)?;
     writeln!(
         report_writer,
-        "  loop headers with no line count            : {}",
-        stats.loop_headers_without_line_data
+        "  {:<46}: {}",
+        "over-long lines: start scanned, rest skipped", stats.overlong_source_lines_total
+    )
+    .map_err(report_buffer_write_error)?;
+    writeln!(
+        report_writer,
+        "  {:<46}: {}",
+        "loop headers found", stats.loop_headers_found
+    )
+    .map_err(report_buffer_write_error)?;
+    writeln!(
+        report_writer,
+        "  {:<46}: {}",
+        "loop headers with no line count", stats.loop_headers_without_line_data
     )
     .map_err(report_buffer_write_error)?;
     writeln!(report_writer).map_err(report_buffer_write_error)?;
@@ -2256,7 +2764,20 @@ fn write_co_count_groups<W: Write>(
             Some(members) => members,
             None => {
                 #[cfg(all(debug_assertions, not(test)))]
-                debug_assert!(false, "co-count run {}..{} invalid", run_start, run_end);
+                debug_assert!(
+                    false,
+                    "CHM-{}: co-count run {}..{} invalid",
+                    HeatmapError::AnaCoCountRunInvalid.code(),
+                    run_start,
+                    run_end
+                );
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "CHM-{}: co-count run {}..{} invalid",
+                    HeatmapError::AnaCoCountRunInvalid.code(),
+                    run_start,
+                    run_end
+                );
                 return Err(HeatmapError::AnaCoCountRunInvalid);
             }
         };
@@ -2813,5 +3334,171 @@ fn idle() {}\n";
         assert!(report_text.contains("groups found: 2"));
         assert!(report_text.contains("count 292014254, 2 sites"));
         assert!(report_text.contains("count 5000000, 2 sites"));
+    }
+
+    /// Parses LCOV text into records (panics on failure: test mode).
+    fn parse_lcov_text(lcov_text: &str) -> Vec<FileCoverageRecord> {
+        parse_lcov_reader(&mut Cursor::new(lcov_text.as_bytes())).unwrap()
+    }
+
+    /// POC-1.2-A acceptance test: a 70 KiB line no longer skips the file;
+    /// the loop on the following line is found with the correct line number,
+    /// count, and enclosing-function count.
+    #[test]
+    fn overlong_source_line_does_not_skip_file_and_next_loop_is_found() {
+        let records = parse_lcov_text(
+            "SF:/abs/src/gen.rs\nFN:1,_ZN3gen4fill17h0E\nFNDA:5,_ZN3gen4fill17h0E\nDA:1,5\nDA:3,500\nend_of_record\n",
+        );
+        let long_array_body = "1,".repeat(35 * 1024); // 71_680 bytes
+        assert!(long_array_body.len() > MAX_LINE_BYTES);
+        let source_text = format!(
+            "fn fill() {{\n    const T: [u8; 1] = [{}];\n    for x in items {{\n    }}\n}}\n",
+            long_array_body
+        );
+        let outcome =
+            scan_source_reader(&mut Cursor::new(source_text.as_bytes()), 0, &records[0]).unwrap();
+        assert_eq!(outcome.overlong_lines_found, 1);
+        assert_eq!(outcome.loop_headers_found, 1);
+        assert_eq!(outcome.loop_sites.len(), 1);
+        assert_eq!(outcome.loop_sites[0].line_number.get().unwrap(), 3);
+        assert_eq!(outcome.loop_sites[0].execution_count, 500);
+        assert_eq!(
+            outcome.loop_sites[0].enclosing_function_entry_count,
+            Some(5)
+        );
+    }
+
+    /// Edge case: a line exactly one byte too long, whose extra byte is its
+    /// newline, has already ended. Nothing may be discarded, otherwise the
+    /// next line (the loop) would be destroyed and line numbers would shift.
+    #[test]
+    fn line_one_byte_over_limit_does_not_swallow_next_line() {
+        let records = parse_lcov_text(
+            "SF:/abs/src/edge.rs\nFN:2,_ZN4edge1f17h0E\nFNDA:1,_ZN4edge1f17h0E\nDA:2,7\nend_of_record\n",
+        );
+        let mut source_text = "x".repeat(MAX_LINE_BYTES);
+        source_text.push('\n');
+        source_text.push_str("for y in z {\n}\n");
+        let outcome =
+            scan_source_reader(&mut Cursor::new(source_text.as_bytes()), 0, &records[0]).unwrap();
+        assert_eq!(outcome.overlong_lines_found, 1);
+        assert_eq!(outcome.loop_sites.len(), 1);
+        assert_eq!(outcome.loop_sites[0].line_number.get().unwrap(), 2);
+        assert_eq!(outcome.loop_sites[0].execution_count, 7);
+    }
+
+    /// A block comment whose `*/` is split exactly between the kept start
+    /// (ending in `*`) and the discarded part (starting with `/`) is still
+    /// seen as closed, so the loop after it is found.
+    #[test]
+    fn block_comment_end_split_across_discard_boundary_is_seen() {
+        let records = parse_lcov_text(
+            "SF:/abs/src/cmt.rs\nFN:1,_ZN3cmt1f17h0E\nFNDA:2,_ZN3cmt1f17h0E\nDA:4,9\nend_of_record\n",
+        );
+        // Line 3: MAX_LINE_BYTES 'x', then "*/". The kept start is
+        // MAX_LINE_BYTES + 1 bytes, so it ends with '*'; the discarded part is "/\n".
+        let mut source_text = String::from("fn f() {\n/* comment start\n");
+        source_text.push_str(&"x".repeat(MAX_LINE_BYTES));
+        source_text.push_str("*/\n");
+        source_text.push_str("for a in b {\n}\n}\n");
+        let outcome =
+            scan_source_reader(&mut Cursor::new(source_text.as_bytes()), 0, &records[0]).unwrap();
+        assert_eq!(outcome.overlong_lines_found, 1);
+        assert_eq!(outcome.loop_sites.len(), 1);
+        assert_eq!(outcome.loop_sites[0].line_number.get().unwrap(), 4);
+    }
+
+    /// A loop header at the start of an over-long line is detected from the
+    /// kept start of the line.
+    #[test]
+    fn loop_header_at_start_of_overlong_line_is_detected() {
+        let records = parse_lcov_text(
+            "SF:/abs/src/big.rs\nFN:1,_ZN3big1g17h0E\nFNDA:3,_ZN3big1g17h0E\nDA:2,42\nend_of_record\n",
+        );
+        let source_text = format!(
+            "fn g() {{\n    for v in [{}] {{\n    }}\n}}\n",
+            "0,".repeat(35 * 1024)
+        );
+        let outcome =
+            scan_source_reader(&mut Cursor::new(source_text.as_bytes()), 0, &records[0]).unwrap();
+        assert_eq!(outcome.overlong_lines_found, 1);
+        assert_eq!(outcome.loop_sites.len(), 1);
+        assert_eq!(outcome.loop_sites[0].line_number.get().unwrap(), 2);
+        assert_eq!(outcome.loop_sites[0].execution_count, 42);
+    }
+
+    /// Discarding: respects the cap, stops right after the newline (the next
+    /// line stays readable), and detects `*/` including the carried `*`.
+    #[test]
+    fn discard_rest_of_source_line_respects_cap_and_stops_at_newline() {
+        let mut no_newline = Cursor::new(b"xxxxxxxxxx".to_vec());
+        assert_eq!(
+            discard_rest_of_source_line(&mut no_newline, false, 4).err(),
+            Some(HeatmapError::SrcLineExceedsSkipCap)
+        );
+
+        let mut with_newline = Cursor::new(b"abc*/def\nNEXT\n".to_vec());
+        assert!(discard_rest_of_source_line(&mut with_newline, false, 100).unwrap());
+        let mut next_line: Vec<u8> = Vec::new();
+        with_newline.read_until(b'\n', &mut next_line).unwrap();
+        assert_eq!(next_line, b"NEXT\n".to_vec());
+
+        let mut carried_star = Cursor::new(b"/rest\n".to_vec());
+        assert!(discard_rest_of_source_line(&mut carried_star, true, 100).unwrap());
+
+        let mut no_comment_end = Cursor::new(b"*x/\n".to_vec());
+        assert!(!discard_rest_of_source_line(&mut no_comment_end, false, 100).unwrap());
+    }
+
+    /// Single source of truth for error-code numbers.
+    ///
+    /// The enum discriminant is the only place a code number may be written.
+    /// Every message must obtain it with `HeatmapError::Variant.code()`.
+    /// This test reads this module and `main.rs` (compiled in as text) and
+    /// fails if the marker "CHM-" is directly followed by a digit anywhere,
+    /// naming the file and line. Renumbering codes therefore cannot leave a
+    /// stale number behind in any message.
+    #[test]
+    fn source_contains_no_hard_coded_error_code_numbers() {
+        let source_files: [(&str, &str); 2] = [
+            (
+                "code_heatmap_5000_module.rs",
+                include_str!("code_heatmap_5000_module.rs"),
+            ),
+            ("main.rs", include_str!("main.rs")),
+        ];
+        let marker = "CHM-";
+        for (file_name, source_text) in source_files.iter() {
+            for (line_index, line_text) in source_text.lines().enumerate() {
+                for (found_index, _) in line_text.match_indices(marker) {
+                    let byte_after_marker = line_text.as_bytes().get(found_index + marker.len());
+                    assert!(
+                        !matches!(byte_after_marker, Some(byte) if byte.is_ascii_digit()),
+                        "{}:{}: hard-coded error-code number: {}",
+                        file_name,
+                        line_index + 1,
+                        line_text.trim()
+                    );
+                }
+            }
+        }
+    }
+
+    /// `USAGE_TEXT` is a static string (no heap, no formatting), so it cannot
+    /// read `MAX_TOP_N` or `DEFAULT_TOP_N` directly. This test keeps it in
+    /// step with those constants: changing a constant without updating the
+    /// usage text fails here.
+    #[test]
+    fn usage_text_matches_top_n_constants() {
+        let range_text = format!("--top-n 1..{}", MAX_TOP_N);
+        let default_text = format!("(default {})", DEFAULT_TOP_N);
+        assert!(
+            USAGE_TEXT.contains(&range_text),
+            "USAGE_TEXT range is stale"
+        );
+        assert!(
+            USAGE_TEXT.contains(&default_text),
+            "USAGE_TEXT default is stale"
+        );
     }
 }

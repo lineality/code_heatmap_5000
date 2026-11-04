@@ -8,7 +8,7 @@ test_files
 data
 logs
 world
-
+modeling*
 
 
 nethernet-key*

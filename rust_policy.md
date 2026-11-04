@@ -99,6 +99,7 @@ Recovery tiers represent functional layers of 'state' in terms of 'recovery leve
   2. Reserve blocks per module/feature (e.g., 100–199 for `FixedSize32Timestamp`).
   3. Variant names: `AcronymFunctionCondition` (e.g., `IoPermissionDenied`).
   4. Document codes in the enum’s doc comment.
+  5. Codes are single-source-of-truth, no hard-coding a 2nd-source of truth for what a code is presumed to be.
 
 - Display for Debug Only:
   `Display` impl (for human-readable text) is compiled only for debug/test builds.
