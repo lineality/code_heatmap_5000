@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "code_heatmap_5000"
+name = "hix_heatmap_indices_for_compute"
 version = "0.1.0"

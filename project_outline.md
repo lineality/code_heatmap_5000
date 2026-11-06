@@ -1,30 +1,29 @@
-# code_heatmap_5000 Project Outline
-### riparian Liebig-Barrel physical code modeling
-##### 2026.11.01-02 Geoffrey Gordon Ashbrook
+# HIX Heatmap Indices for Compute (Project Outline)
+*"Somebody wakeup HIX."*
 
+### Liebig-Barrel, Physical, Data, Code, Compute, Time, Memory Riparian Modeling
+
+hix_heatmap_indices_for_compute.rs
+hix.exe
+
+##### 2026.11.01-... Geoffrey Gordon Ashbrook
 
 
 #### Preamble Notes:
 
 - Liebig's Barrel: https://en.wikipedia.org/wiki/Liebig%27s_law_of_the_minimum 
 
-- Policy: While no third-party dependencies is ideal, there is a good chance that well-tested utilities exist (one would hope!) and can be used or cover all or or some of this sketch of scope. It may be possible to use no 3rd party rust crates (or so up to a point).
+- Holzmann: https://spinroot.com/gerard/pdf/P10.pdf 
 
-- This is focused on Rust-language. It could be more abstractly (as another separate scope/project, or purely for comparison-planning-design discussion) for odin-lang, zig-lang, c, etc.
+- HIX is focused on the Rust-language. It could be more abstractly (as another separate scope/project, or purely for comparison-planning-design discussion) for odin-lang, zig-lang, c, etc.
 
-
-#### Analysis that scales with sanity: for small or large projects
-- Tiny-Slim Projects: Tunnels: https://github.com/lineality/tunnels 
-- Medium-Slim Projects: Lines, FF, Uma; 
-https://github.com/lineality/lines_editor, 
-https://github.com/lineality/ff_file_manager_minimal_rust 
-- Variable Size Projects: https://github.com/lineality/granmo_model_nlp_classifier_rust 
-- Larger Projects: https://github.com/pumpkin-mc/pumpkin
 
 
 # Mapping Code Performance
 
-Part of the context here is what might be seen as an array of modes, styles, and contexts.
+Goal: A tool-set to analyze and report on code performance behavior to be able to improve code design.
+
+Part of the context here is what might be seen as an array of ~modes, styles, and contexts, comparing and combining modes of what might be described as Development-Modes of code with (what might be described as) Implementation/Context type "modes."  By visualizing this design/development/deployment/improvement/maintenance problem-space landscape, we might be able to better focus on various needs and goals and their priorities. For example, what information/data are we using to navigate and decide within this problem space? This array can be seen as a data-information-question array: Do data compellingly suggest that there is work to be done (or not) in any of these areas? What are leads to look at? What are 'smoking guns'? Etc. What is ambiguous? What are tradeoffs, etc? 
 
 | Implementation-Context Mode | Test / Analysis Mode | Debug Mode | Production Release Mode |
 | :--- | :--- | :--- | :--- |
@@ -35,7 +34,7 @@ Part of the context here is what might be seen as an array of modes, styles, and
 | **5. GPU / TPU / _PU Parallel Mode** | | | |
 
 
-#### X axis: Holzman-Type Development-Modes
+#### X axis: Holzmann-Type Development-Modes
 
 1. Test/Analysis Mode
 2. Debug Mode
@@ -53,11 +52,29 @@ Part of the context here is what might be seen as an array of modes, styles, and
 
 
 
-
 In this context, this idea is to (baby steps from crude starting point) explore systems, focusing on Rust, to get eval/analytics numbers on such things as:
 
 
-# code_heatmap_5000: empirical and dynamic code analysis 
+# hix_heatmap_indices_for_compute: empirical and dynamic code analysis 
+
+The 'indices' aspect of this, beyond providing various raw-data for human interpretation, is somewhat aspirational but perhaps can be achieved by disambiguating different areas for indices where what they represent can be notably different.
+
+
+Raw-Type Indices:
+1. Count-Heat-Index Per Loop & Function
+2. Time-Heat-Index Per Loop & Function
+3. Some Count Heat Function(s) Per Loop & Function
+4. Inner-Element-Heat within Notable Loops & Functions
+
+
+
+
+Interpretive Indices: Good vs. Bad Indices
+A critical distinction between types of indices is the basic distinction between saying that a loop or function is prominent and should be vs. saying that a given region is prominent and it should not be, indicating that something should be changed. This may be similar to saying highly-represented in a neutral way, vs. something being over-represented in a pejorative way. 
+
+
+
+
 
 0. Dashboard, Report-Organization: Useful presentation and exploration of data. E.g. Specific types and sub-types of head and tracing back what/where was measured how. (terminal/TUI, file(e.g. json), HTML, PDF)
 
@@ -106,17 +123,20 @@ Two possible 'modes' for using this tool are:
 1. Looking at heat, which might or might not be natural differences (you can't tell unless you look) (maybe the default)
 2. Identifying patterns or signatures that are not just 'places to look for issues that might not exist' but that are likely issues themselves detected directly. (maybe speculative)
 
+#### Maybe: 
+- Level 1 Macro (MVP): Function-Loop Level Maps, Scores
+- Level 2 (Zoom-in): Inside Hot Functions & Loops: Maps, Scores
 
 
 # MVP Overview:
 
-A hypothetical starting point is...
 
 #### count, report, and analyze these metrics:
 
 1. raw count: how often each function is called 
 2. raw count: how often is each region run
 3. derived: Scale thresholds: Does the scale of use justify taking a different approach (or having an alternate path, e.g. the classic CPU vs. GPU load pivot, where above a given scale GPU is cheaper, but before that it is more expensive (maybe erlang type cpu/distributed lambda-function-abstraction is similar?)
+
 
 #### Report can include:
 1. raw count, percent, log per "function" 
@@ -132,6 +152,28 @@ Q: detecting regions to track other than loops (or specific loops)
 e.g. Loop vs. Function:
 A function may only run once but still contain a hot-loop
 but a not-loop function... will at least on a first pass be counted as spotted? So maybe only loops and functions (not other regions) to be counted?
+
+
+
+#### Primary Analysis: 
+'heat map' of functions and loop counts: Relative Heat Counts, Logs, Percents, for N-time or N-max-loops (u32)
+
+#### Secondary Analysis: 
+Lag-Map: How-Slow: a super-duper-slow function/loop might not be called that many times because it is so slow. 
+
+#### Meta-Analysis: 
+Where to improve how?
+In some cases another step of digging may be needed: e.g. If a given function is hot or laggy, what exactly in/about that function is the issue/solution?
+
+
+
+### Analysis that scales with sanity: for small or large projects
+- Tiny-Slim Projects: Tunnels: https://github.com/lineality/tunnels 
+- Medium-Slim Projects: Lines, FF, Uma; 
+https://github.com/lineality/lines_editor, 
+https://github.com/lineality/ff_file_manager_minimal_rust 
+- Variable Size Projects: https://github.com/lineality/granmo_model_nlp_classifier_rust 
+- Larger Projects: https://github.com/pumpkin-mc/pumpkin
 
 
 ## Overall Workflow:
@@ -167,6 +209,13 @@ output may be less standardized.
 
 Both ~should record data including a usable/comparable source file path, line numbers and / or "function" names.
 
+(note by claude:
+```
+To keep perf manageable:
+
+POC-2a: self time only. Sample without call graphs and attribute each sample to its leaf frame. This is a tiny parse with small files, and it cannot fail because of unwinding.
+POC-2b: inclusive time. Use frame-pointer call graphs (-C force-frame-pointers=yes), never DWARF unwinding. Cap the stack depth per sample, which keeps loops bounded.
+```
 
 ## Naive Approach 2:
 
@@ -192,15 +241,6 @@ B. appending to a file, or (rarely or never needed)
 C. creating a 'count' stub-file in a directory (may be async-safe) (rarely or never needed)
 
 
-
-Primary Analysis: 'heat map' of functions and loop counts: Relative Heat Counts, Logs, Percents, for N-time or N-max-loops (u32)
-
-Secondary Analysis: Lag-Map: How-Slow: a super-duper-slow function/loop might not be called that many times because it is so slow. 
-
-Meta-Analysis: Where to improve how?
-In some cases another step of digging may be needed: e.g. If a given function is hot or laggy, what exactly in/about that function is the issue/solution?
-
-
 ### Four Time Options
 
 Another basic design question is how high/long to count.
@@ -213,7 +253,6 @@ Or it may be that A is better, assuming that potentially large counts are fine, 
 
 
 Naive Count Parameter D: If duration can be arbitrary, then whenever the program is stopped. 
-
 
 
 ### MVP approach to "Observer Effect" modeling and avoidance
@@ -244,23 +283,23 @@ If there is a difference, that is noted. If there isn't a difference, then that 
 
 cargo-perf complements clippy with checks specific to async code and common loop-related performance issues that clippy doesn’t catch."
 
-- cargo llvm-cov / tarpaulin: 
+- cargo llvm-cov / tarpaulin
 
 - perf annotate: gives source-annotated sample counts
 
-- cargo bench:
+- cargo bench
 
 - DHAT, heaptrack: memory lag analysis
 
 - tokio-console: Async runtime attribution
 
-- Criterion:
+- Criterion
 
-- callgrind:
+- callgrind
 
-- cargo-perf lints:
+- cargo-perf lints
 
-- Clippy perf lints:
+- Clippy perf lints
 
 
 6. A given 'region' of code may be implemented in various ways:
@@ -277,18 +316,14 @@ cargo-perf complements clippy with checks specific to async code and common loop
 
 7. Some types/implementations of analysis do not scale well:
 
-- AST: While I assume that some people will want to one-hammer-everything-nails turn this into an AST project, I want to look more closely at where this makes sense or not. E.g. for a small project an AST (or similar model) might help conceptually and practically. However, an initial larger-scale use-case for code_heatmap_5000 is https://github.com/pumpkin-mc/pumpkin , where pumpkin-mc is so big that it literally crashes a better than normal computer to just open the zed editor when it runs the Rust Language Server (possibly: to build the AST) to look at a file. 
+- AST: While I assume that some people will want to one-hammer-everything-nails turn this into an AST project, I want to look more closely at where this makes sense or not. E.g. for a small project an AST (or similar model) might help conceptually and practically. However, an initial larger-scale use-case for hix_heatmap_indices_for_compute is https://github.com/pumpkin-mc/pumpkin , where pumpkin-mc is so big that it literally crashes a better than normal computer to just open the zed editor when it runs the Rust Language Server (possibly: to build the AST) to look at a file. 
 
 Part of the core-idea here is analysis that scales with sanity. 
 
 
 8. Scale and separation of processes: It may be that a 'single' analysis is broken up into various parts and steps, such as 'prioritization' steps that eliminate the large numbers of cold functions and loops.
 
-
-
-
 9. Where a time measure needs to be unaffected by the act of measuring then either a separate time-measure process step may be used or it may be an approximation or not possible, this should be clear in the data. E.g. the way that (maybe nested?) test-times may compound may make some times seem longer if they are not time-measured correctly. 
-
 
 10. Async and counting:
 
@@ -297,13 +332,13 @@ Depending on the case for what is counted and how, in-memory counting may be the
 (use a HUGE grain of salt for the following brainstorm-code, these were suggested by Gemini)
 
 (only to be used for multithreaded async (such as Tokyo))
-```gemini-small-not-smart-model
+```(grain of salt > from gemini-small-not-smart-model)
 GLOBAL_COUNTERS[SITE_ID].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 ```
 
 vs.
 Thread-Local Counters 
-```gemini-small-not-smart-model
+```(grain of salt > from gemini-small-not-smart-model)
 
 Step 1 (The Pad): Every waiter has their own personal notepad in their pocket (THREAD_COUNTERS).
 
@@ -349,16 +384,13 @@ pub fn flush_thread_counters() {
 }
 ```
 
-10. await time-architecture analysis: a possibly useful (and possibly possible) analysis area is the design and behavior of what is awaiting what for how long. All else optimized, an await-system itself may not be designed correctly.
+11. await time-architecture analysis: a possibly useful (and possibly possible) analysis area is the design and behavior of what is awaiting what for how long. All else optimized, an await-system itself may not be designed correctly.
 
 (maybe... comparing time-stamps at either end of the awaited code?)
 
+12. There may already be tools for this, but A. first, what is this, and B. are existing tools missing or deficient in anything?)
 
-
-11. There may already be tools for this, but A. first, what is this, and B. are existing tools missing or deficient in anything?)
-
-
-12. Goal: Map and Spot the low hanging Fruit
+13. Goal: Map and Spot the low hanging Fruit
 As with any "optimization" (or massive-non-optimization issue analysis) the first priority is low hanging fruit and overall perspective. 
 
 Liebig's barrel: https://en.wikipedia.org/wiki/Liebig%27s_law_of_the_minimum  
@@ -374,16 +406,28 @@ This tool is not (currently) conceived of as being for cases where everything is
 - dwelling on '"real" timing'(usually not a goal at all) vs. 'relative test time approximation'(goal)
 
 
+14. Policy: While having no third-party dependencies is ideal, there is a good chance that well-tested utilities exist (one would hope!) and can be used or cover all or or some of this sketch of scope. It may be possible to use no 3rd party rust crates (or so up to a point).
+
+
+
 # MVP-1 Scope:
 
-1. Use cargo/samply tools to look at functions and loops, not (yet, if ever) file-changes for bespoke regions within functions and loops.
+1. Use perf tools to look at functions and loops, not (yet, if ever) file-changes for bespoke regions within functions and loops.
+(Claude 5.5 is forever in a flame war with itself between using cargo/samply or perf... I cannot figure out why. cargo/samply maybe used later or in some other cases maybe)
 
 2. Use/Output a parameter-specified Top-N quadrant report, e.g. overall data about each quadrant, and top-N examples of path-to-fn/loop in 3/4 quadrants.
 
 3. For quad 4:4 (low,low) for which there is no need to give examples (though 
 one or two might be academically useful in terms of looking at the bottom N lowest of the low...) the low/low portion of the quadrant could contain some overall metrics such as what portion of function / loops are in that group, maybe what portion of time is used by that group (which might be an indicator of how big the gaps are (e.g. if 99.9% of functions and loops are in low, low, that's probably a good sign... maybe). (Note: maybe there should be a high-level quad for overall data for all four regions?)
 
-4. Maybe: wizard_wrapper_module.rs, a Q&A bash-using module for (fedora) linux that can be called by main to semi-automate the overall process (including checking to see that things are installed). E.g. Q&A -> What is the path to the crate you want to test (required)? Is this default path to save the results-files ok (y/n)? [] Is this default path to save the report files ok (y/n)? [] etc.
+4. "You're a wizard, Heatmap!": Make a wizard_cli_module.rs, a Q&A bash-using module for (fedora) linux that can be called by main to semi-automate the overall process (including checking to see that things are installed). E.g. Q&A -> What is the path to the crate you want to test (required)? Is this default path to save the results-files ok (y/n)? [] Is this default path to save the report files ok (y/n)? [] etc. Store files in a standard run_data dir. (As the overall process grows, having a clear cli-wizard will be important for practical use, standardized use, and arguably repeat/audit/re-test use. (e.g. possibly having, saving and (re) running (sharing, etc) a wiz_config_{} file (whatever format). 
+
+5. Time/duration of test probably should be included...
+
+6. Choice of and use of perf over samply should be fully explained/documented.
+
+7. No Yard Sale: All run/modeling files should be placed in / accessed from some standard dir such as /run_data/ or /modeling_data/ that is safely git-ignored: preferred 'modeling_data' or 'modeling_files' or just 'modeling'
+
 
 # Not in MVP-1:
 1. super-nuanced async/atomic/concurrent/parallel analysis
@@ -395,3 +439,4 @@ one or two might be academically useful in terms of looking at the bottom N lowe
 3. languages other than Rust
 4. a 'heavy AST', type-analysis, etc.
 5. extremely arcane/exotic use-cases
+6. per-line analysis is not anticipated (that might go along with only within specific regions within functions/loops, which is all future scope)

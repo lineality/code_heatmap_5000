@@ -1,4 +1,4 @@
-//! # code_heatmap_5000_module.rs — POC-1: Primary Count-Heat (first slice of MVP 1.1)
+//! # hix_heatmap_indices_for_compute.rs — POC-1: Primary Count-Heat (first slice of MVP 1.1)
 //!
 //! ## Development phase & use-type
 //! - Phase: POC-1. First runnable slice of MVP 1.1 ("Primary Count").
@@ -154,20 +154,20 @@ const DECADE_BUCKET_COUNT: usize = 21;
 const REPORT_BUFFER_INITIAL_CAPACITY: usize = 64 * 1024;
 
 /// Output file name for the human-readable report (inside `--out-dir`).
-const REPORT_FILE_NAME: &str = "code_heatmap_5000_report.txt";
+const REPORT_FILE_NAME: &str = "hix_report.txt";
 
 /// Output file name for the full per-site TSV data (inside `--out-dir`).
-const SITES_TSV_FILE_NAME: &str = "code_heatmap_5000_sites.tsv";
+const SITES_TSV_FILE_NAME: &str = "hix_sites.tsv";
 
 /// Error log file name, created next to the executable (codes only, no PII).
-const ERROR_LOG_FILE_NAME: &str = "code_heatmap_5000_error_log.txt";
+const ERROR_LOG_FILE_NAME: &str = "hix_error_log.txt";
 
 /// Usage text shown by `main` for command-line errors (static: no heap).
 pub const USAGE_TEXT: &str = "\
-usage: code_heatmap_5000 --lcov /ABSOLUTE/path/file.lcov --out-dir /ABSOLUTE/output/dir [--top-n 1..10000]
+usage: hix --lcov /ABSOLUTE/path/file.lcov --out-dir /ABSOLUTE/output/dir [--top-n 1..10000]
 
   --lcov     LCOV file from: cargo llvm-cov report --lcov --output-path /ABSOLUTE/file.lcov
-  --out-dir  directory for code_heatmap_5000_report.txt and code_heatmap_5000_sites.tsv
+  --out-dir  directory for hix_report.txt and hix_sites.tsv
   --top-n    rows per Top-N table (default 20)
 All paths must be absolute.";
 
@@ -2352,7 +2352,7 @@ fn write_text_report<W: Write>(
     let stats = inputs.loop_scan_statistics;
     writeln!(
         report_writer,
-        "code_heatmap_5000 :: POC-1.2 count-heat report"
+        "hix_heatmap_indices_for_compute :: POC-1.2 count-heat report"
     )
     .map_err(report_buffer_write_error)?;
     writeln!(
@@ -3212,7 +3212,7 @@ fn idle() {}\n";
         let lcov_path = std::env::temp_dir().join("chm_test_input.lcov");
         let output_path = std::env::temp_dir().join("chm_test_out");
         let arguments = vec![
-            OsString::from("code_heatmap_5000"),
+            OsString::from("hix"), // correct? TODO check
             OsString::from("--lcov"),
             lcov_path.clone().into_os_string(),
             OsString::from("--out-dir"),
@@ -3462,8 +3462,8 @@ fn idle() {}\n";
     fn source_contains_no_hard_coded_error_code_numbers() {
         let source_files: [(&str, &str); 2] = [
             (
-                "code_heatmap_5000_module.rs",
-                include_str!("code_heatmap_5000_module.rs"),
+                "hix_heatmap_indices_for_compute.rs",
+                include_str!("hix_heatmap_indices_for_compute.rs"),
             ),
             ("main.rs", include_str!("main.rs")),
         ];
