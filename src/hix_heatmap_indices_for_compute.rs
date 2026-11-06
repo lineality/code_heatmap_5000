@@ -1,7 +1,7 @@
-//! # hix_heatmap_indices_for_compute.rs — POC-1: Primary Count-Heat (first slice of MVP 1.1)
+//! # hix_heatmap_indices_for_compute.rs — POC-1.2: Primary Count-Heat (MVP 1.1)
 //!
 //! ## Development phase & use-type
-//! - Phase: POC-1. First runnable slice of MVP 1.1 ("Primary Count").
+//! - Phase: POC-1.2, part of MVP 1.1 ("Primary Count").
 //! - Use-type: local developer analysis tool, run on demand, one-shot CLI.
 //! - Priorities: transparent, deterministic, reproducible numbers;
 //!   analysis that scales with sanity (no AST, no type analysis);
@@ -13,7 +13,7 @@
 //! (meta-heat quadrant), to find the "low staves" of the Liebig barrel:
 //! the low-hanging fruit.
 //!
-//! POC-1 does count-heat only:
+//! POC-1.x does count-heat only:
 //! 1. Read an LCOV file produced by `cargo llvm-cov` from an instrumented
 //!    (`-C instrument-coverage`) run of the target program.
 //! 2. FUNCTION sites: from `FN:`/`FNDA:` records. Function entry counts are
@@ -57,6 +57,9 @@
 //! - Block-comment tracking uses "does this line contain `*/`": a line that
 //!   closes one block comment and opens another (`*/ ... /*`) is treated as
 //!   closed. This applies to normal and over-long lines alike.
+//! - Nested block comments (`/* /* */ */`) are closed at the first `*/`.
+//!   Loop keywords in the rest of such a comment usually have no line count
+//!   and are then reported as "no line count".
 //!
 //! ## Modes
 //! - Production-release: never panics; errors are 2-byte `HeatmapError` codes;
@@ -89,7 +92,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // ============================================================================
 
 /// Maximum number of `--flag value` pairs accepted on the command line.
-const MAX_CLI_FLAG_PAIRS: usize = 8;
+/// Equals the number of distinct flags (`--lcov`, `--out-dir`, `--top-n`).
+/// Each flag may appear at most once, so any further argument is
+/// "too many arguments" (code 101). Raise this when a flag is added;
+/// the test `cli_parse_cli_arguments_extra_pair_with_code_101` fails if not.
+const MAX_CLI_FLAG_PAIRS: usize = 3;
 
 /// Default number of rows in each Top-N table when `--top-n` is not given.
 const DEFAULT_TOP_N: u16 = 20;
@@ -143,8 +150,13 @@ const MAX_OPEN_ATTEMPTS: u32 = 3;
 /// Tier-1 retry: backoff step in milliseconds (attempt n sleeps n * step).
 const OPEN_RETRY_BACKOFF_STEP_MS: u64 = 50;
 
+/// Number of concentration targets: the only place this count is written.
+const CONCENTRATION_TARGET_COUNT: usize = 3;
+
 /// Concentration targets: "the hottest K sites carry P% of all counts".
-const CONCENTRATION_TARGETS_PERCENT: [u128; 3] = [50, 90, 99];
+/// Ascending. The last target also defines the cold tail
+/// ("the remaining sites carry <= 100 - P% of counts").
+const CONCENTRATION_TARGETS_PERCENT: [u128; CONCENTRATION_TARGET_COUNT] = [50, 90, 99];
 
 /// Order-of-magnitude histogram buckets: bucket 0 = count 0,
 /// bucket d (1..=20) = count in [10^(d-1), 10^d). u64::MAX has 20 digits.
@@ -256,6 +268,7 @@ pub enum HeatmapError {
     AnaHistogramIndexInvalid = 404,
     AnaFunctionLineIndexOverflow = 405,
     AnaCoCountRunInvalid = 406,
+    AnaLoopScanTotalsMismatch = 407,
 
     // 500–599: report output
     RptCreateDirectoryFailed = 501,
@@ -292,6 +305,7 @@ impl HeatmapError {
 
             HeatmapError::AnaFunctionLineIndexOverflow
             | HeatmapError::AnaCoCountRunInvalid
+            | HeatmapError::AnaLoopScanTotalsMismatch
             | HeatmapError::CliTooManyArguments
             | HeatmapError::CliUnknownFlag
             | HeatmapError::CliMissingFlagValue
@@ -379,6 +393,9 @@ impl std::fmt::Display for HeatmapError {
                 "function-line index count sum overflowed"
             }
             HeatmapError::AnaCoCountRunInvalid => "co-count group range invalid",
+            HeatmapError::AnaLoopScanTotalsMismatch => {
+                "loop-scan file counts do not add up to files listed in lcov"
+            }
             HeatmapError::CliTooManyArguments => "too many command-line arguments",
             HeatmapError::CliUnknownFlag => "unknown command-line flag",
             HeatmapError::CliMissingFlagValue => "flag given without a value",
@@ -739,7 +756,7 @@ struct HeatKindSummary {
     zero_count_sites: usize,
     total_count: u128,
     /// Aligned with `CONCENTRATION_TARGETS_PERCENT`; 0 means "n/a" (total = 0).
-    sites_reaching_percent: [usize; 3],
+    sites_reaching_percent: [usize; CONCENTRATION_TARGET_COUNT],
     decade_histogram: [u64; DECADE_BUCKET_COUNT],
 }
 
@@ -797,8 +814,9 @@ struct ReportInputs<'a> {
     top_n_limit: usize,
     /// Duplicate `FN` names within a file (integrity check; expected 0).
     duplicate_function_name_count: usize,
+    /// Source paths listed in more than one `SF:` record (integrity check; expected 0).
+    duplicate_source_path_count: usize,
 }
-
 // ============================================================================
 // Public entry points
 // ============================================================================
@@ -878,7 +896,7 @@ pub fn append_error_code_to_log(error_code: HeatmapError) -> Result<(), HeatmapE
 // Orchestration
 // ============================================================================
 
-/// Runs the full POC-1.1 count-heat pipeline for an already-validated configuration.
+/// Runs the full count-heat pipeline for an already-validated configuration.
 ///
 /// # Project context
 /// This is the single orchestration point of the tool. Each step consumes the
@@ -932,6 +950,7 @@ fn run_heatmap_with_configuration(
     // Step 3: loop sites (lexical scan; per-file failures absorbed at Tier 2),
     // sorted + summarized together.
     let (mut loop_sites, loop_scan_statistics) = scan_all_files_for_loops(&coverage_records);
+    check_loop_scan_totals(&loop_scan_statistics)?;
     let loop_summary = sort_and_summarize_sites(&mut loop_sites)?;
 
     // Step 4: render reports into memory (no disk writes yet).
@@ -949,6 +968,7 @@ fn run_heatmap_with_configuration(
         loop_scan_statistics: &loop_scan_statistics,
         top_n_limit,
         duplicate_function_name_count,
+        duplicate_source_path_count: count_duplicate_source_paths(&coverage_records),
     };
 
     let mut report_bytes: Vec<u8> = Vec::with_capacity(REPORT_BUFFER_INITIAL_CAPACITY);
@@ -1129,13 +1149,18 @@ fn open_file_with_retry(
                 if !error_code.is_retryable() {
                     return Err(error_code);
                 }
-                let backoff_milliseconds = OPEN_RETRY_BACKOFF_STEP_MS
-                    .saturating_mul(u64::from(attempt_index).saturating_add(1));
+                // Last attempt failed: the result is decided, so do not sleep.
+                let next_attempt_index = attempt_index.saturating_add(1);
+                if next_attempt_index >= MAX_OPEN_ATTEMPTS {
+                    return Err(error_code);
+                }
+                let backoff_milliseconds =
+                    OPEN_RETRY_BACKOFF_STEP_MS.saturating_mul(u64::from(next_attempt_index));
                 std::thread::sleep(Duration::from_millis(backoff_milliseconds));
             }
         }
     }
-    // Only retryable (transient) failures reach here: attempts exhausted.
+    // Reached only if MAX_OPEN_ATTEMPTS is 0 (no attempt was made).
     Err(codes.transient)
 }
 
@@ -1697,6 +1722,27 @@ fn build_function_sites(
     Ok((function_sites, duplicate_function_name_count))
 }
 
+/// Counts source paths that appear in more than one `SF:` record.
+///
+/// # Project context
+/// Integrity check, shown in provenance (expected 0). A single
+/// `cargo llvm-cov report` lists each file once. A nonzero value (for
+/// example, from concatenated LCOV files) means one file's sites appear
+/// twice, each with only part of the counts.
+///
+/// # Returns
+/// The number of `SF:` records whose path was already seen.
+fn count_duplicate_source_paths(records: &[FileCoverageRecord]) -> usize {
+    let mut source_paths_seen: HashSet<&str> = HashSet::with_capacity(records.len());
+    let mut duplicate_source_path_count: usize = 0;
+    for record in records.iter() {
+        if !source_paths_seen.insert(record.source_path_text.as_str()) {
+            duplicate_source_path_count = duplicate_source_path_count.saturating_add(1);
+        }
+    }
+    duplicate_source_path_count
+}
+
 // ============================================================================
 // Loop sites (lexical scan, no AST)
 // ============================================================================
@@ -1809,6 +1855,67 @@ fn scan_all_files_for_loops(records: &[FileCoverageRecord]) -> (Vec<HeatSite>, L
         }
     }
     (all_loop_sites, scan_statistics)
+}
+
+/// Checks that every source file listed in the LCOV was counted exactly
+/// once: either as scanned, or under exactly one skip reason.
+///
+/// # Project context
+/// The `[loop-scan coverage]` block promises that no file goes unexplained.
+/// This check makes that promise structural: if a later edit adds a skip
+/// path but forgets its counter, the run stops with a code instead of
+/// printing figures that silently do not add up.
+///
+/// # Arguments
+/// - `statistics`: the counters returned by `scan_all_files_for_loops`.
+///
+/// # Returns
+/// - `Ok(())` when scanned + every skip reason == `files_total`.
+/// - `Err(AnaLoopScanTotalsMismatch)` when they differ, or if the sum overflows.
+///
+/// # Modes
+/// Debug builds (not test) panic via `debug_assert!`; test and debug builds
+/// print the two totals; production-release returns the code only.
+fn check_loop_scan_totals(statistics: &LoopScanStatistics) -> Result<(), HeatmapError> {
+    let accounted_parts: [usize; 8] = [
+        statistics.files_scanned,
+        statistics.files_skipped_cold,
+        statistics.files_skipped_non_absolute_path,
+        statistics.files_skipped_not_found,
+        statistics.files_skipped_permission_denied,
+        statistics.files_skipped_line_exceeds_skip_cap,
+        statistics.files_skipped_too_many_lines,
+        statistics.files_skipped_other_error,
+    ];
+    let mut accounted_files: usize = 0;
+    for part in accounted_parts.iter() {
+        accounted_files = match accounted_files.checked_add(*part) {
+            Some(sum) => sum,
+            None => return Err(HeatmapError::AnaLoopScanTotalsMismatch),
+        };
+    }
+
+    // --- Check: scanned + all skip reasons == files listed in the LCOV ---
+    // internal invariant — every file is counted in exactly one place.
+    if accounted_files != statistics.files_total {
+        #[cfg(all(debug_assertions, not(test)))]
+        debug_assert!(
+            false,
+            "CHM-{}: accounted {} != listed {}",
+            HeatmapError::AnaLoopScanTotalsMismatch.code(),
+            accounted_files,
+            statistics.files_total
+        );
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "CHM-{}: accounted {} != listed {}",
+            HeatmapError::AnaLoopScanTotalsMismatch.code(),
+            accounted_files,
+            statistics.files_total
+        );
+        return Err(HeatmapError::AnaLoopScanTotalsMismatch);
+    }
+    Ok(())
 }
 
 /// Opens one source file (Tier-1 retry) and scans it.
@@ -2201,7 +2308,7 @@ fn summarize_sorted_sites(sorted_sites: &[HeatSite]) -> Result<HeatKindSummary, 
         site_count: sorted_sites.len(),
         zero_count_sites: 0,
         total_count: 0,
-        sites_reaching_percent: [0; 3],
+        sites_reaching_percent: [0; CONCENTRATION_TARGET_COUNT],
         decade_histogram: [0; DECADE_BUCKET_COUNT],
     };
 
@@ -2231,7 +2338,7 @@ fn summarize_sorted_sites(sorted_sites: &[HeatSite]) -> Result<HeatKindSummary, 
     }
 
     // threshold_i = total * target_percent_i (compare against cumulative * 100).
-    let mut scaled_thresholds: [u128; 3] = [0; 3];
+    let mut scaled_thresholds: [u128; CONCENTRATION_TARGET_COUNT] = [0; CONCENTRATION_TARGET_COUNT];
     for (target_index, target_percent) in CONCENTRATION_TARGETS_PERCENT.iter().enumerate() {
         let threshold = match summary.total_count.checked_mul(*target_percent) {
             Some(value) => value,
@@ -2409,9 +2516,16 @@ fn write_text_report<W: Write>(
     )
     .map_err(report_buffer_write_error)?;
     writeln!(report_writer, "  duplicate FN names      : {}  (expected 0; nonzero = names collapsed before parsing, function counts may be double-counted)", inputs.duplicate_function_name_count).map_err(report_buffer_write_error)?;
+    writeln!(report_writer, "  duplicate SF paths      : {}  (expected 0; nonzero = one source file listed more than once, its sites appear more than once)", inputs.duplicate_source_path_count).map_err(report_buffer_write_error)?;
     writeln!(report_writer).map_err(report_buffer_write_error)?;
 
     writeln!(report_writer, "[loop-scan coverage]").map_err(report_buffer_write_error)?;
+    writeln!(
+        report_writer,
+        "  {:<46}: {}",
+        "files listed in lcov", stats.files_total
+    )
+    .map_err(report_buffer_write_error)?;
     writeln!(
         report_writer,
         "  {:<46}: {}",
@@ -2556,13 +2670,23 @@ fn write_heat_kind_section<W: Write>(
             )
             .map_err(report_buffer_write_error)?;
         }
-        let sites_for_99 = summary.sites_reaching_percent.get(2).copied().unwrap_or(0);
-        let cold_tail_sites = summary.site_count.saturating_sub(sites_for_99);
+        let last_target_index = CONCENTRATION_TARGET_COUNT.saturating_sub(1);
+        let sites_for_last_target = summary
+            .sites_reaching_percent
+            .get(last_target_index)
+            .copied()
+            .unwrap_or(0);
+        let last_target_percent = CONCENTRATION_TARGETS_PERCENT
+            .get(last_target_index)
+            .copied()
+            .unwrap_or(100);
+        let cold_tail_sites = summary.site_count.saturating_sub(sites_for_last_target);
         writeln!(
             report_writer,
-            "  cold tail: {} sites ({:.2}% of sites) together carry <= 1% of counts",
+            "  cold tail: {} sites ({:.2}% of sites) together carry <= {}% of counts",
             cold_tail_sites,
-            percent_of_site_count(cold_tail_sites, summary.site_count)
+            percent_of_site_count(cold_tail_sites, summary.site_count),
+            100u128.saturating_sub(last_target_percent)
         )
         .map_err(report_buffer_write_error)?;
     }
@@ -2812,7 +2936,7 @@ fn write_co_count_groups<W: Write>(
 /// # Project context
 /// The TSV is the machine-readable data product: complete (not Top-N), with
 /// stable identity `source_path` + `line`, intended for POC-2 to join
-/// time-heat (samply) onto count-heat.
+/// time-heat (perf) onto count-heat.
 ///
 /// # Column contract (append-only)
 /// `kind, rank, count, percent_of_kind, log10_count, source_path, line, name,
@@ -2907,14 +3031,12 @@ fn write_tsv_rows<W: Write>(
     }
     Ok(())
 }
-// ============================================================================
-// Tests (test mode only)
-// ============================================================================
+
 // ============================================================================
 // Tests (test mode only)
 // ============================================================================
 
-/// Unit tests for POC-1.1 (compiled only under `cargo test`).
+/// Unit tests (compiled only under `cargo test`).
 ///
 /// All tests use in-memory input (`std::io::Cursor`) and synthetic sites, so
 /// they touch no files except `std::env::temp_dir()` path *values* (never
@@ -3001,6 +3123,7 @@ fn idle() {}\n";
             loop_scan_statistics: &statistics,
             top_n_limit: 10,
             duplicate_function_name_count: 0,
+            duplicate_source_path_count: 0,
         };
         let mut report_bytes: Vec<u8> = Vec::new();
         write_text_report(&mut report_bytes, &inputs).unwrap();
@@ -3212,7 +3335,7 @@ fn idle() {}\n";
         let lcov_path = std::env::temp_dir().join("chm_test_input.lcov");
         let output_path = std::env::temp_dir().join("chm_test_out");
         let arguments = vec![
-            OsString::from("hix"), // correct? TODO check
+            OsString::from("hix"), // argument 0 (program name): skipped by the parser
             OsString::from("--lcov"),
             lcov_path.clone().into_os_string(),
             OsString::from("--out-dir"),
@@ -3294,6 +3417,7 @@ fn idle() {}\n";
             loop_scan_statistics: &statistics,
             top_n_limit: 10,
             duplicate_function_name_count: 0,
+            duplicate_source_path_count: 0,
         };
         let mut report_bytes: Vec<u8> = Vec::new();
         write_text_report(&mut report_bytes, &inputs).unwrap();
@@ -3500,5 +3624,200 @@ fn idle() {}\n";
             USAGE_TEXT.contains(&default_text),
             "USAGE_TEXT default is stale"
         );
+    }
+
+    /// Loop-scan totals: consistent counters pass; counters that do not add
+    /// up (built directly, simulating a forgotten counter) return 407.
+    #[test]
+    fn ana_check_loop_scan_totals_mismatch_with_code_407() {
+        let consistent = LoopScanStatistics {
+            files_total: 3,
+            files_scanned: 1,
+            files_skipped_cold: 2,
+            ..LoopScanStatistics::default()
+        };
+        assert!(check_loop_scan_totals(&consistent).is_ok());
+
+        let inconsistent = LoopScanStatistics {
+            files_total: 3,
+            files_scanned: 1,
+            ..LoopScanStatistics::default()
+        };
+        let error = check_loop_scan_totals(&inconsistent).unwrap_err();
+        assert_eq!(error, HeatmapError::AnaLoopScanTotalsMismatch);
+        assert_eq!(error.code(), 407);
+    }
+
+    /// A source path listed in two `SF:` records is counted once as a duplicate.
+    #[test]
+    fn duplicate_source_paths_are_counted() {
+        let records = parse_lcov_text(
+            "SF:/abs/a.rs\nDA:1,1\nend_of_record\nSF:/abs/b.rs\nDA:1,1\nend_of_record\nSF:/abs/a.rs\nDA:2,1\nend_of_record\n",
+        );
+        assert_eq!(count_duplicate_source_paths(&records), 1);
+        assert_eq!(count_duplicate_source_paths(&parse_sample()), 0);
+    }
+
+    /// The cold-tail line derives its ceiling from the last concentration
+    /// target (99 -> "<= 1%"), not from typed-in text.
+    #[test]
+    fn cold_tail_line_uses_last_concentration_target() {
+        let records = parse_sample();
+        let function_sites = vec![make_site(90, 1), make_site(9, 2), make_site(1, 3)];
+        let report_text = render_text_report(&records, &function_sites, &[]);
+        assert!(report_text.contains("together carry <= 1% of counts"));
+    }
+
+    /// Runs the command-line parser on string arguments; returns the error, if any.
+    fn cli_error(arguments: &[&str]) -> Option<HeatmapError> {
+        let os_arguments: Vec<OsString> = arguments
+            .iter()
+            .map(|argument| OsString::from(*argument))
+            .collect();
+        parse_cli_arguments(os_arguments.into_iter()).err()
+    }
+
+    #[test]
+    fn cli_parse_cli_arguments_extra_pair_with_code_101() {
+        let error = cli_error(&[
+            "hix",
+            "--lcov",
+            "/abs/in.lcov",
+            "--out-dir",
+            "/abs/out",
+            "--top-n",
+            "5",
+            "--extra",
+            "x",
+        ])
+        .unwrap();
+        assert_eq!(error, HeatmapError::CliTooManyArguments);
+        assert_eq!(error.code(), 101);
+    }
+
+    #[test]
+    fn cli_parse_cli_arguments_missing_lcov_with_code_104() {
+        let error = cli_error(&["hix", "--out-dir", "/abs/out"]).unwrap();
+        assert_eq!(error, HeatmapError::CliMissingLcovPath);
+        assert_eq!(error.code(), 104);
+    }
+
+    #[test]
+    fn cli_parse_cli_arguments_missing_out_dir_with_code_105() {
+        let error = cli_error(&["hix", "--lcov", "/abs/in.lcov"]).unwrap();
+        assert_eq!(error, HeatmapError::CliMissingOutputDirectory);
+        assert_eq!(error.code(), 105);
+    }
+
+    #[test]
+    fn cli_parse_cli_arguments_top_n_not_a_number_with_code_107() {
+        let error = cli_error(&[
+            "hix",
+            "--lcov",
+            "/abs/in.lcov",
+            "--out-dir",
+            "/abs/out",
+            "--top-n",
+            "ten",
+        ])
+        .unwrap();
+        assert_eq!(error, HeatmapError::CliTopNNotANumber);
+        assert_eq!(error.code(), 107);
+    }
+
+    #[test]
+    fn cli_parse_cli_arguments_duplicate_flag_with_code_108() {
+        let error = cli_error(&["hix", "--lcov", "/abs/a.lcov", "--lcov", "/abs/b.lcov"]).unwrap();
+        assert_eq!(error, HeatmapError::CliDuplicateFlag);
+        assert_eq!(error.code(), 108);
+    }
+
+    #[test]
+    fn type_top_n_count_new_zero_via_cli_with_code_150() {
+        let error = cli_error(&[
+            "hix",
+            "--lcov",
+            "/abs/in.lcov",
+            "--out-dir",
+            "/abs/out",
+            "--top-n",
+            "0",
+        ])
+        .unwrap();
+        assert_eq!(error, HeatmapError::TypeTopNOutOfRange);
+        assert_eq!(error.code(), 150);
+    }
+
+    /// Invariant catch: a TopNCount corrupted after construction (built
+    /// directly, simulating a bit-flip) is rejected by `.get()`.
+    #[test]
+    fn type_top_n_count_get_corrupted_with_code_151() {
+        let corrupted = TopNCount { top_n_value: 0 };
+        let error = corrupted.get().unwrap_err();
+        assert_eq!(error, HeatmapError::TypeTopNCorrupted);
+        assert_eq!(error.code(), 151);
+    }
+
+    /// Invariant catch: a SourceLineNumber corrupted to 0 is rejected by `.get()`.
+    #[test]
+    fn type_source_line_number_get_corrupted_with_code_153() {
+        let corrupted = SourceLineNumber { line_value: 0 };
+        let error = corrupted.get().unwrap_err();
+        assert_eq!(error, HeatmapError::TypeLineNumberCorrupted);
+        assert_eq!(error.code(), 153);
+    }
+
+    /// Invariant catch: an AbsolutePath holding a relative path is rejected by `.get()`.
+    #[test]
+    fn type_absolute_path_get_corrupted_with_code_155() {
+        let corrupted = AbsolutePath {
+            absolute_path: PathBuf::from("relative/path"),
+        };
+        let error = corrupted.get().unwrap_err();
+        assert_eq!(error, HeatmapError::TypePathCorrupted);
+        assert_eq!(error.code(), 155);
+    }
+
+    #[test]
+    fn lcov_parse_not_utf8_with_code_208() {
+        let mut cursor = Cursor::new(b"SF:/abs/a\xff.rs\n".to_vec());
+        let error = parse_lcov_reader(&mut cursor).unwrap_err();
+        assert_eq!(error, HeatmapError::LcovNotUtf8);
+        assert_eq!(error.code(), 208);
+    }
+
+    #[test]
+    fn lcov_parse_end_of_record_outside_file_with_code_209() {
+        let mut cursor = Cursor::new("end_of_record\n".as_bytes());
+        let error = parse_lcov_reader(&mut cursor).unwrap_err();
+        assert_eq!(error, HeatmapError::LcovRecordOutsideFile);
+        assert_eq!(error.code(), 209);
+    }
+
+    #[test]
+    fn lcov_parse_nested_sf_with_code_212() {
+        let mut cursor = Cursor::new("SF:/abs/a.rs\nSF:/abs/b.rs\n".as_bytes());
+        let error = parse_lcov_reader(&mut cursor).unwrap_err();
+        assert_eq!(error, HeatmapError::LcovMalformedRecord);
+        assert_eq!(error.code(), 212);
+    }
+
+    #[test]
+    fn lcov_parse_fnda_sum_overflow_with_code_216() {
+        let mut cursor = Cursor::new(
+            "SF:/abs/a.rs\nFNDA:18446744073709551615,f\nFNDA:1,f\nend_of_record\n".as_bytes(),
+        );
+        let error = parse_lcov_reader(&mut cursor).unwrap_err();
+        assert_eq!(error, HeatmapError::LcovCountOverflow);
+        assert_eq!(error.code(), 216);
+    }
+
+    /// Invariant catch: a site whose file index points past the records.
+    #[test]
+    fn ana_lookup_source_path_invalid_index_with_code_402() {
+        let records = parse_sample();
+        let error = lookup_source_path(&records, 99).unwrap_err();
+        assert_eq!(error, HeatmapError::AnaFileIndexInvalid);
+        assert_eq!(error.code(), 402);
     }
 }

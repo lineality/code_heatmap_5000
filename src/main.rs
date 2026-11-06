@@ -47,18 +47,18 @@ cargo run --release -- \
 
 # demangle .txt and .tsv (NOT .lcov)
 ```
-rustfilt < /home/oops/code/hix_heatmap_indices_for_compute/run_data/run1/hix_heatmap_indices_for_compute_report.txt \
-        > /home/oops/code/hix_heatmap_indices_for_compute/run_data/run1/hix_heatmap_indices_for_compute_report.demangled.txt
+rustfilt < /home/oops/code/hix_heatmap_indices_for_compute/run_data/run1/hix_report.txt \
+        > /home/oops/code/hix_heatmap_indices_for_compute/run_data/run1/hix_report.demangled.txt
 ```
 ```
-rustfilt < /home/oops/code/hix_heatmap_indices_for_compute/run_data/run1/hix_heatmap_indices_for_compute_sites.tsv \
-        > /home/oops/code/hix_heatmap_indices_for_compute/run_data/run1/hix_heatmap_indices_for_compute_sites.demangled.tsv
+rustfilt < /home/oops/code/hix_heatmap_indices_for_compute/run_data/run1/hix_sites.tsv \
+        > /home/oops/code/hix_heatmap_indices_for_compute/run_data/run1/hix_sites.demangled.tsv
 ```
 
   */
 
 mod hix_heatmap_indices_for_compute;
-use hix_heatmap_indices_for_compute::{append_error_code_to_log, run_heatmap_cli, USAGE_TEXT};
+use hix_heatmap_indices_for_compute::{USAGE_TEXT, append_error_code_to_log, run_heatmap_cli};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
