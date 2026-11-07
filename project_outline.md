@@ -537,7 +537,13 @@ analysis_NNN_<purpose>
 3. For quad 4:4 (low,low) for which there is no need to give examples (though 
 one or two might be academically useful in terms of looking at the bottom N lowest of the low...) the low/low portion of the quadrant could contain some overall metrics such as what portion of function / loops are in that group, maybe what portion of time is used by that group (which might be an indicator of how big the gaps are (e.g. if 99.9% of functions and loops are in low, low, that's probably a good sign... maybe). (Note: maybe there should be a high-level quad for overall data for all four regions?)
 
-4. "You're a wizard, Heatmap!": Make a wizard_cli_module.rs, a Q&A bash-using module for (fedora) linux that can be called by main to semi-automate the overall process (including checking to see that things are installed). E.g. Q&A -> What is the path to the crate you want to test (required)? Is this default path to save the results-files ok (y/n)? [] Is this default path to save the report files ok (y/n)? [] etc. Store files in a standard modeling_data dir. (As the overall process grows, having a clear cli-wizard will be important for practical use, standardized use, and arguably repeat/audit/re-test use. (e.g. possibly having, saving and (re) running (sharing, etc) a wiz_config_{} file (whatever format). 
+4. "You're a wizard, Heatmap!": Make a wizard_cli_module.rs, a Q&A bash-using module for (fedora) linux that can be called by main to semi-automate the overall process (including checking to see that things are installed). E.g. Q&A -> What is the path to the crate you want to test (required)? Is this default path to save the results-files ok (y/n)? [] Is this default path to save the report files ok (y/n)? [] etc. Store files in a standard modeling_data dir. (As the overall process grows, having a clear cli-wizard will be important for practical use, standardized use, and arguably repeat/audit/re-test use. Plan A: the wizard can ask to use an existing config-(probably TOML) file, or produce one that is saved as a result of the user's inputs. E.g. 1. (if existing config files) Would you like to use one of these files, select by number: [list] or (n)o (or empty enter), if new 2. What is the path to the project (Rust-crate) you are testing? 3. What is the name of this test-set? etc. 
+
+run (sharing, etc) or make a hix_{}.toml file (or whatever format). 
+
+There is a module that can be used/adapted for clean toml reading.
+
+
 
 5. Time/duration of test probably should be included...
 
