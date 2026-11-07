@@ -28,31 +28,31 @@ cargo llvm-cov run --release --no-report --bin pumpkin
 cargo llvm-cov report --release --lcov --output-path /home/YOU/hix/pumpkin_run1.lcov
 e.g.
 ```bash
-cargo llvm-cov report --release --lcov --output-path /home/oops/code/hix_heatmap_indices_for_compute/run_data/pumpkin_run3.lcov
+cargo llvm-cov report --release --lcov --output-path /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/pumpkin_run3.lcov
 ```
 
 <pseudo-code>
 /home/YOU/code/hix_heatmap_indices_for_compute/target/release/hix_heatmap_indices_for_compute \
-  --lcov /home/oops/code/hix_heatmap_indices_for_compute/run_data/pumpkin_run1.lcov \
-  --out-dir /home/YOU/hix_heatmap_indices_for_compute/run_data/run1 \
+  --lcov /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/pumpkin_run1.lcov \
+  --out-dir /home/YOU/hix_heatmap_indices_for_compute/modeling_data/run1 \
   --top-n 30
 
 e.g.
 ```bash
 cargo run --release -- \
-  --lcov /home/oops/code/hix_heatmap_indices_for_compute/run_data/pumpkin_run3.lcov \
-  --out-dir /home/oops/code/hix_heatmap_indices_for_compute/run_data/run3 \
+  --lcov /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/pumpkin_run3.lcov \
+  --out-dir /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/run3 \
   --top-n 15
 ```
 
 # demangle .txt and .tsv (NOT .lcov)
 ```
-rustfilt < /home/oops/code/hix_heatmap_indices_for_compute/run_data/run1/hix_report.txt \
-        > /home/oops/code/hix_heatmap_indices_for_compute/run_data/run1/hix_report.demangled.txt
+rustfilt < /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/run1/hix_report.txt \
+        > /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/run1/hix_report.demangled.txt
 ```
 ```
-rustfilt < /home/oops/code/hix_heatmap_indices_for_compute/run_data/run1/hix_sites.tsv \
-        > /home/oops/code/hix_heatmap_indices_for_compute/run_data/run1/hix_sites.demangled.tsv
+rustfilt < /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/run1/hix_sites.tsv \
+        > /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/run1/hix_sites.demangled.tsv
 ```
 
   */

@@ -466,7 +466,7 @@ impl std::fmt::Display for HeatmapError {
             HeatmapError::LogWriteFailed => "error log write failed",
             HeatmapError::LogClockBeforeEpoch => "system clock is before UNIX epoch",
         };
-        write!(formatter, "CHM-{}: {}", self.code(), description)
+        write!(formatter, "HIX-{}: {}", self.code(), description)
     }
 }
 
@@ -487,7 +487,7 @@ impl TopNCount {
         if candidate_top_n == 0 || candidate_top_n > MAX_TOP_N {
             #[cfg(debug_assertions)]
             eprintln!(
-                "CHM-{}: top-n {} outside 1..={}",
+                "HIX-{}: top-n {} outside 1..={}",
                 HeatmapError::TypeTopNOutOfRange.code(),
                 candidate_top_n,
                 MAX_TOP_N
@@ -505,13 +505,13 @@ impl TopNCount {
             #[cfg(all(debug_assertions, not(test)))]
             debug_assert!(
                 false,
-                "CHM-{}: TopNCount corrupted: {}",
+                "HIX-{}: TopNCount corrupted: {}",
                 HeatmapError::TypeTopNCorrupted.code(),
                 self.top_n_value
             );
             #[cfg(debug_assertions)]
             eprintln!(
-                "CHM-{}: TopNCount recheck failed: {}",
+                "HIX-{}: TopNCount recheck failed: {}",
                 HeatmapError::TypeTopNCorrupted.code(),
                 self.top_n_value
             );
@@ -533,7 +533,7 @@ impl SourceLineNumber {
         if candidate_line == 0 {
             #[cfg(debug_assertions)]
             eprintln!(
-                "CHM-{}: line number 0 is invalid",
+                "HIX-{}: line number 0 is invalid",
                 HeatmapError::TypeLineNumberZero.code()
             );
             return Err(HeatmapError::TypeLineNumberZero);
@@ -549,12 +549,12 @@ impl SourceLineNumber {
             #[cfg(all(debug_assertions, not(test)))]
             debug_assert!(
                 false,
-                "CHM-{}: SourceLineNumber corrupted: 0",
+                "HIX-{}: SourceLineNumber corrupted: 0",
                 HeatmapError::TypeLineNumberCorrupted.code()
             );
             #[cfg(debug_assertions)]
             eprintln!(
-                "CHM-{}: SourceLineNumber recheck failed",
+                "HIX-{}: SourceLineNumber recheck failed",
                 HeatmapError::TypeLineNumberCorrupted.code()
             );
             return Err(HeatmapError::TypeLineNumberCorrupted);
@@ -575,7 +575,7 @@ impl AbsolutePath {
         if !candidate_path.is_absolute() {
             #[cfg(debug_assertions)]
             eprintln!(
-                "CHM-{}: not absolute: {}",
+                "HIX-{}: not absolute: {}",
                 HeatmapError::TypePathNotAbsolute.code(),
                 candidate_path.display()
             );
@@ -592,12 +592,12 @@ impl AbsolutePath {
             #[cfg(all(debug_assertions, not(test)))]
             debug_assert!(
                 false,
-                "CHM-{}: AbsolutePath corrupted",
+                "HIX-{}: AbsolutePath corrupted",
                 HeatmapError::TypePathCorrupted.code()
             );
             #[cfg(debug_assertions)]
             eprintln!(
-                "CHM-{}: AbsolutePath recheck failed",
+                "HIX-{}: AbsolutePath recheck failed",
                 HeatmapError::TypePathCorrupted.code()
             );
             return Err(HeatmapError::TypePathCorrupted);
@@ -838,7 +838,7 @@ pub fn append_error_code_to_log(error_code: HeatmapError) -> Result<(), HeatmapE
         Err(_io_error) => {
             #[cfg(debug_assertions)]
             eprintln!(
-                "CHM-{}: current_exe failed: {}",
+                "HIX-{}: current_exe failed: {}",
                 HeatmapError::LogExecutablePathUnavailable.code(),
                 _io_error
             );
@@ -865,7 +865,7 @@ pub fn append_error_code_to_log(error_code: HeatmapError) -> Result<(), HeatmapE
         Err(_io_error) => {
             #[cfg(debug_assertions)]
             eprintln!(
-                "CHM-{}: error log open failed: {}",
+                "HIX-{}: error log open failed: {}",
                 HeatmapError::LogOpenFailed.code(),
                 _io_error
             );
@@ -883,7 +883,7 @@ pub fn append_error_code_to_log(error_code: HeatmapError) -> Result<(), HeatmapE
         Err(_io_error) => {
             #[cfg(debug_assertions)]
             eprintln!(
-                "CHM-{}: error log write failed: {}",
+                "HIX-{}: error log write failed: {}",
                 HeatmapError::LogWriteFailed.code(),
                 _io_error
             );
@@ -980,7 +980,7 @@ fn run_heatmap_with_configuration(
     if let Err(_io_error) = fs::create_dir_all(output_directory_path) {
         #[cfg(debug_assertions)]
         eprintln!(
-            "CHM-{}: create_dir_all failed: {}",
+            "HIX-{}: create_dir_all failed: {}",
             HeatmapError::RptCreateDirectoryFailed.code(),
             _io_error
         );
@@ -994,7 +994,7 @@ fn run_heatmap_with_configuration(
     if let Err(_io_error) = standard_output_lock.write_all(&report_bytes) {
         #[cfg(debug_assertions)]
         eprintln!(
-            "CHM-{}: stdout write failed: {}",
+            "HIX-{}: stdout write failed: {}",
             HeatmapError::RptStdoutWriteFailed.code(),
             _io_error
         );
@@ -1003,7 +1003,7 @@ fn run_heatmap_with_configuration(
     if let Err(_io_error) = standard_output_lock.flush() {
         #[cfg(debug_assertions)]
         eprintln!(
-            "CHM-{}: stdout flush failed: {}",
+            "HIX-{}: stdout flush failed: {}",
             HeatmapError::RptStdoutWriteFailed.code(),
             _io_error
         );
@@ -1067,7 +1067,7 @@ where
                     Err(_parse_error) => {
                         #[cfg(debug_assertions)]
                         eprintln!(
-                            "CHM-{}: --top-n parse failed: {}",
+                            "HIX-{}: --top-n parse failed: {}",
                             HeatmapError::CliTopNNotANumber.code(),
                             _parse_error
                         );
@@ -1078,7 +1078,7 @@ where
             _ => {
                 #[cfg(debug_assertions)]
                 eprintln!(
-                    "CHM-{}: unknown flag: {:?}",
+                    "HIX-{}: unknown flag: {:?}",
                     HeatmapError::CliUnknownFlag.code(),
                     flag_argument
                 );
@@ -1140,7 +1140,7 @@ fn open_file_with_retry(
                 let error_code = classify_open_error(io_error.kind(), codes);
                 #[cfg(debug_assertions)]
                 eprintln!(
-                    "CHM-{}: open attempt {} failed for {}: {}",
+                    "HIX-{}: open attempt {} failed for {}: {}",
                     error_code.code(),
                     attempt_index,
                     file_path.display(),
@@ -1174,7 +1174,7 @@ fn write_bytes_to_new_file(file_path: &Path, file_bytes: &[u8]) -> Result<(), He
     if let Err(_io_error) = output_file.write_all(file_bytes) {
         #[cfg(debug_assertions)]
         eprintln!(
-            "CHM-{}: write failed: {}",
+            "HIX-{}: write failed: {}",
             HeatmapError::RptFileWriteFailed.code(),
             _io_error
         );
@@ -1183,7 +1183,7 @@ fn write_bytes_to_new_file(file_path: &Path, file_bytes: &[u8]) -> Result<(), He
     if let Err(_io_error) = output_file.flush() {
         #[cfg(debug_assertions)]
         eprintln!(
-            "CHM-{}: flush failed: {}",
+            "HIX-{}: flush failed: {}",
             HeatmapError::RptFlushFailed.code(),
             _io_error
         );
@@ -1208,7 +1208,7 @@ fn read_bounded_line<R: BufRead>(
             if bytes_read > MAX_LINE_BYTES {
                 #[cfg(debug_assertions)]
                 eprintln!(
-                    "CHM-{}: line exceeds {} bytes",
+                    "HIX-{}: line exceeds {} bytes",
                     line_too_long_code.code(),
                     MAX_LINE_BYTES
                 );
@@ -1219,7 +1219,7 @@ fn read_bounded_line<R: BufRead>(
         Err(_io_error) => {
             #[cfg(debug_assertions)]
             eprintln!(
-                "CHM-{}: read failed: {}",
+                "HIX-{}: read failed: {}",
                 read_failed_code.code(),
                 _io_error
             );
@@ -1280,7 +1280,7 @@ fn read_source_line_skipping_overlong<R: BufRead>(
             Err(_io_error) => {
                 #[cfg(debug_assertions)]
                 eprintln!(
-                    "CHM-{}: source read failed: {}",
+                    "HIX-{}: source read failed: {}",
                     HeatmapError::SrcReadFailed.code(),
                     _io_error
                 );
@@ -1378,7 +1378,7 @@ fn discard_rest_of_source_line<R: BufRead>(
             Err(_io_error) => {
                 #[cfg(debug_assertions)]
                 eprintln!(
-                    "CHM-{}: read failed while discarding over-long line: {}",
+                    "HIX-{}: read failed while discarding over-long line: {}",
                     HeatmapError::SrcSkipReadFailed.code(),
                     _io_error
                 );
@@ -1409,7 +1409,7 @@ fn discard_rest_of_source_line<R: BufRead>(
         if discarded_byte_count > skip_cap_bytes {
             #[cfg(debug_assertions)]
             eprintln!(
-                "CHM-{}: over-long line remainder exceeds {} bytes; skipping file",
+                "HIX-{}: over-long line remainder exceeds {} bytes; skipping file",
                 HeatmapError::SrcLineExceedsSkipCap.code(),
                 skip_cap_bytes
             );
@@ -1422,7 +1422,7 @@ fn discard_rest_of_source_line<R: BufRead>(
 
     #[cfg(debug_assertions)]
     eprintln!(
-        "CHM-{}: discard read-call limit {} reached",
+        "HIX-{}: discard read-call limit {} reached",
         HeatmapError::SrcSkipReadCallLimit.code(),
         maximum_read_calls
     );
@@ -1456,7 +1456,7 @@ fn parse_lcov_reader<R: BufRead>(reader: &mut R) -> Result<Vec<FileCoverageRecor
             Err(_utf8_error) => {
                 #[cfg(debug_assertions)]
                 eprintln!(
-                    "CHM-{}: lcov line not UTF-8: {}",
+                    "HIX-{}: lcov line not UTF-8: {}",
                     HeatmapError::LcovNotUtf8.code(),
                     _utf8_error
                 );
@@ -1588,7 +1588,7 @@ fn parse_lcov_line_number(line_text: &str) -> Result<SourceLineNumber, HeatmapEr
         Err(_parse_error) => {
             #[cfg(debug_assertions)]
             eprintln!(
-                "CHM-{}: bad line number {:?}: {}",
+                "HIX-{}: bad line number {:?}: {}",
                 HeatmapError::LcovBadLineNumber.code(),
                 line_text,
                 _parse_error
@@ -1609,7 +1609,7 @@ fn parse_lcov_count(count_text: &str) -> Result<u64, HeatmapError> {
         Err(_parse_error) => {
             #[cfg(debug_assertions)]
             eprintln!(
-                "CHM-{}: bad count {:?}: {}",
+                "HIX-{}: bad count {:?}: {}",
                 HeatmapError::LcovBadCount.code(),
                 count_text,
                 _parse_error
@@ -1683,13 +1683,13 @@ fn build_function_sites(
                             #[cfg(all(debug_assertions, not(test)))]
                             debug_assert!(
                                 false,
-                                "CHM-{}: site index {} invalid",
+                                "HIX-{}: site index {} invalid",
                                 HeatmapError::AnaSiteIndexInvalid.code(),
                                 existing_site_index
                             );
                             #[cfg(debug_assertions)]
                             eprintln!(
-                                "CHM-{}: site index {} invalid",
+                                "HIX-{}: site index {} invalid",
                                 HeatmapError::AnaSiteIndexInvalid.code(),
                                 existing_site_index
                             );
@@ -1901,14 +1901,14 @@ fn check_loop_scan_totals(statistics: &LoopScanStatistics) -> Result<(), Heatmap
         #[cfg(all(debug_assertions, not(test)))]
         debug_assert!(
             false,
-            "CHM-{}: accounted {} != listed {}",
+            "HIX-{}: accounted {} != listed {}",
             HeatmapError::AnaLoopScanTotalsMismatch.code(),
             accounted_files,
             statistics.files_total
         );
         #[cfg(debug_assertions)]
         eprintln!(
-            "CHM-{}: accounted {} != listed {}",
+            "HIX-{}: accounted {} != listed {}",
             HeatmapError::AnaLoopScanTotalsMismatch.code(),
             accounted_files,
             statistics.files_total
@@ -2394,7 +2394,7 @@ fn percent_of_site_count(part: usize, whole: usize) -> f64 {
 fn report_buffer_write_error(_io_error: std::io::Error) -> HeatmapError {
     #[cfg(debug_assertions)]
     eprintln!(
-        "CHM-{}: report buffer write failed: {}",
+        "HIX-{}: report buffer write failed: {}",
         HeatmapError::RptBufferWriteFailed.code(),
         _io_error
     );
@@ -2412,13 +2412,13 @@ fn lookup_source_path(
             #[cfg(all(debug_assertions, not(test)))]
             debug_assert!(
                 false,
-                "CHM-{}: file index {} invalid",
+                "HIX-{}: file index {} invalid",
                 HeatmapError::AnaFileIndexInvalid.code(),
                 file_index
             );
             #[cfg(debug_assertions)]
             eprintln!(
-                "CHM-{}: file index {} invalid",
+                "HIX-{}: file index {} invalid",
                 HeatmapError::AnaFileIndexInvalid.code(),
                 file_index
             );
@@ -2890,14 +2890,14 @@ fn write_co_count_groups<W: Write>(
                 #[cfg(all(debug_assertions, not(test)))]
                 debug_assert!(
                     false,
-                    "CHM-{}: co-count run {}..{} invalid",
+                    "HIX-{}: co-count run {}..{} invalid",
                     HeatmapError::AnaCoCountRunInvalid.code(),
                     run_start,
                     run_end
                 );
                 #[cfg(debug_assertions)]
                 eprintln!(
-                    "CHM-{}: co-count run {}..{} invalid",
+                    "HIX-{}: co-count run {}..{} invalid",
                     HeatmapError::AnaCoCountRunInvalid.code(),
                     run_start,
                     run_end
@@ -3041,8 +3041,13 @@ fn write_tsv_rows<W: Write>(
 /// All tests use in-memory input (`std::io::Cursor`) and synthetic sites, so
 /// they touch no files except `std::env::temp_dir()` path *values* (never
 /// created or opened). `unwrap`/`assert!` are allowed here (test mode).
+///
+/// Test names: `<area>_<function>_<condition>[_with_code_<nnn>]`.
+/// Areas: `cli`, `type`, `lcov`, `src` (loop scan), `ana` (analysis),
+/// `rpt` (report output), `err` (error-code policy), `guard`
+/// (single-source-of-truth checks on the source text itself).
 #[cfg(test)]
-mod tests {
+mod hix_heatmap_indices_for_compute_tests {
     use super::*;
     use std::io::Cursor;
 
@@ -3132,7 +3137,7 @@ fn idle() {}\n";
 
     /// LCOV parsing: one SF record with all FN/DA entries and the file max count.
     #[test]
-    fn lcov_parse_reads_one_record() {
+    fn lcov_parse_lcov_reader_reads_one_record() {
         let records = parse_sample();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].source_path_text, "/abs/src/world.rs");
@@ -3143,7 +3148,7 @@ fn idle() {}\n";
     /// Function sites: two instances at line 1 merge into one site (750 calls),
     /// and mangled names are unique, so the duplicate-name counter stays 0.
     #[test]
-    fn function_sites_merge_monomorphized_instances() {
+    fn ana_build_function_sites_merges_monomorphized_instances() {
         let records = parse_sample();
         let (mut sites, duplicate_function_name_count) = build_function_sites(&records).unwrap();
         sort_sites_hottest_first(&mut sites);
@@ -3157,7 +3162,7 @@ fn idle() {}\n";
 
     /// Loop scan: finds the real header at line 3 and ignores keywords in comments.
     #[test]
-    fn loop_scan_finds_header_and_skips_comments() {
+    fn src_scan_source_reader_finds_header_and_skips_comments() {
         let records = parse_sample();
         let mut source_cursor = Cursor::new(SAMPLE_SOURCE.as_bytes());
         let outcome = scan_source_reader(&mut source_cursor, 0, &records[0]).unwrap();
@@ -3171,7 +3176,7 @@ fn idle() {}\n";
     /// Loop scan: the loop records its enclosing function's summed entry
     /// count (500 + 250), and the report shows the per-call ratio (101.0).
     #[test]
-    fn loop_site_records_enclosing_function_count() {
+    fn src_scan_source_reader_records_enclosing_function_count() {
         let records = parse_sample();
         let mut source_cursor = Cursor::new(SAMPLE_SOURCE.as_bytes());
         let outcome = scan_source_reader(&mut source_cursor, 0, &records[0]).unwrap();
@@ -3185,7 +3190,7 @@ fn idle() {}\n";
 
     /// Keyword detection: accepted loop forms and rejected look-alikes.
     #[test]
-    fn loop_keyword_detection_cases() {
+    fn src_detect_loop_keyword_accepts_and_rejects_cases() {
         assert_eq!(
             detect_loop_keyword(b"for x in items {"),
             Some(LoopKeyword::For)
@@ -3211,51 +3216,58 @@ fn idle() {}\n";
         assert_eq!(detect_loop_keyword(b"let x = 1;"), None);
     }
 
-    /// LCOV errors: each failure site returns its own unique code.
     #[test]
-    fn lcov_errors_have_specific_codes() {
-        let mut unterminated = Cursor::new("SF:/abs/a.rs\nDA:1,1\n".as_bytes());
-        assert_eq!(
-            parse_lcov_reader(&mut unterminated).err(),
-            Some(HeatmapError::LcovUnterminatedRecord)
-        );
+    fn lcov_parse_unterminated_record_with_code_214() {
+        let mut cursor = Cursor::new("SF:/abs/a.rs\nDA:1,1\n".as_bytes());
+        let error = parse_lcov_reader(&mut cursor).unwrap_err();
+        assert_eq!(error, HeatmapError::LcovUnterminatedRecord);
+        assert_eq!(error.code(), 214);
+    }
 
-        let mut outside = Cursor::new("DA:1,1\n".as_bytes());
-        assert_eq!(
-            parse_lcov_reader(&mut outside).err(),
-            Some(HeatmapError::LcovRecordOutsideFile)
-        );
+    #[test]
+    fn lcov_parse_entry_outside_file_with_code_209() {
+        let mut cursor = Cursor::new("DA:1,1\n".as_bytes());
+        let error = parse_lcov_reader(&mut cursor).unwrap_err();
+        assert_eq!(error, HeatmapError::LcovRecordOutsideFile);
+        assert_eq!(error.code(), 209);
+    }
 
-        let mut empty = Cursor::new("".as_bytes());
-        assert_eq!(
-            parse_lcov_reader(&mut empty).err(),
-            Some(HeatmapError::LcovNoData)
-        );
+    #[test]
+    fn lcov_parse_empty_input_with_code_215() {
+        let mut cursor = Cursor::new("".as_bytes());
+        let error = parse_lcov_reader(&mut cursor).unwrap_err();
+        assert_eq!(error, HeatmapError::LcovNoData);
+        assert_eq!(error.code(), 215);
+    }
 
-        let mut bad_count = Cursor::new("SF:/abs/a.rs\nDA:1,abc\nend_of_record\n".as_bytes());
-        assert_eq!(
-            parse_lcov_reader(&mut bad_count).err(),
-            Some(HeatmapError::LcovBadCount)
-        );
+    #[test]
+    fn lcov_parse_bad_count_with_code_211() {
+        let mut cursor = Cursor::new("SF:/abs/a.rs\nDA:1,abc\nend_of_record\n".as_bytes());
+        let error = parse_lcov_reader(&mut cursor).unwrap_err();
+        assert_eq!(error, HeatmapError::LcovBadCount);
+        assert_eq!(error.code(), 211);
+    }
 
-        let mut zero_line = Cursor::new("SF:/abs/a.rs\nDA:0,1\nend_of_record\n".as_bytes());
-        assert_eq!(
-            parse_lcov_reader(&mut zero_line).err(),
-            Some(HeatmapError::LcovBadLineNumber)
-        );
+    #[test]
+    fn lcov_parse_zero_line_number_with_code_210() {
+        let mut cursor = Cursor::new("SF:/abs/a.rs\nDA:0,1\nend_of_record\n".as_bytes());
+        let error = parse_lcov_reader(&mut cursor).unwrap_err();
+        assert_eq!(error, HeatmapError::LcovBadLineNumber);
+        assert_eq!(error.code(), 210);
+    }
 
-        let long_line = "x".repeat(MAX_LINE_BYTES + 10);
-        let mut too_long = Cursor::new(long_line.into_bytes());
-        assert_eq!(
-            parse_lcov_reader(&mut too_long).err(),
-            Some(HeatmapError::LcovLineTooLong)
-        );
+    #[test]
+    fn lcov_parse_line_too_long_with_code_206() {
+        let mut cursor = Cursor::new("x".repeat(MAX_LINE_BYTES + 10).into_bytes());
+        let error = parse_lcov_reader(&mut cursor).unwrap_err();
+        assert_eq!(error, HeatmapError::LcovLineTooLong);
+        assert_eq!(error.code(), 206);
     }
 
     /// Duplicate-name integrity check: two `FN` entries with one name in one
     /// file are counted (the condition that arises if LCOV is demangled first).
     #[test]
-    fn duplicate_function_names_are_counted() {
+    fn ana_build_function_sites_counts_duplicate_names() {
         let lcov_text = "SF:/abs/a.rs\nFN:1,same\nFN:5,same\nFNDA:3,same\nDA:1,3\nend_of_record\n";
         let records = parse_lcov_reader(&mut Cursor::new(lcov_text.as_bytes())).unwrap();
         let (sites, duplicate_function_name_count) = build_function_sites(&records).unwrap();
@@ -3265,7 +3277,7 @@ fn idle() {}\n";
 
     /// Summary on sorted input: totals, concentration, and decade histogram.
     #[test]
-    fn summary_concentration_and_histogram() {
+    fn ana_summarize_sorted_sites_concentration_and_histogram() {
         let mut sites = vec![
             make_site(9, 2),
             make_site(90, 1),
@@ -3286,7 +3298,7 @@ fn idle() {}\n";
     /// produce the same concentration as sorted input.
     /// (Unsorted summarize of [1, 9, 0, 90] would wrongly report 4 sites for 50%.)
     #[test]
-    fn sort_and_summarize_handles_unsorted_input() {
+    fn ana_sort_and_summarize_sites_handles_unsorted_input() {
         let mut sites = vec![
             make_site(1, 3),
             make_site(9, 2),
@@ -3300,38 +3312,42 @@ fn idle() {}\n";
 
     /// Summary when every count is 0: not an error; concentration is "n/a".
     #[test]
-    fn summary_of_all_zero_counts_is_not_an_error() {
+    fn ana_summarize_sorted_sites_all_zero_counts_not_an_error() {
         let sites = vec![make_site(0, 1), make_site(0, 2)];
         let summary = summarize_sorted_sites(&sites).unwrap();
         assert_eq!(summary.total_count, 0);
         assert_eq!(summary.sites_reaching_percent, [0, 0, 0]);
     }
 
-    /// Custom types reject out-of-range values at construction.
     #[test]
-    fn custom_types_enforce_bounds() {
+    fn type_top_n_count_new_out_of_range_with_code_150() {
+        let error = TopNCount::new(0).unwrap_err();
+        assert_eq!(error, HeatmapError::TypeTopNOutOfRange);
+        assert_eq!(error.code(), 150);
         assert_eq!(
-            TopNCount::new(0).err(),
-            Some(HeatmapError::TypeTopNOutOfRange)
-        );
-        assert_eq!(
-            TopNCount::new(MAX_TOP_N + 1).err(),
-            Some(HeatmapError::TypeTopNOutOfRange)
+            TopNCount::new(MAX_TOP_N + 1).unwrap_err(),
+            HeatmapError::TypeTopNOutOfRange
         );
         assert_eq!(TopNCount::new(5).unwrap().get().unwrap(), 5);
-        assert_eq!(
-            SourceLineNumber::new(0).err(),
-            Some(HeatmapError::TypeLineNumberZero)
-        );
-        assert_eq!(
-            AbsolutePath::new(PathBuf::from("relative/x.lcov")).err(),
-            Some(HeatmapError::TypePathNotAbsolute)
-        );
+    }
+
+    #[test]
+    fn type_source_line_number_new_zero_with_code_152() {
+        let error = SourceLineNumber::new(0).unwrap_err();
+        assert_eq!(error, HeatmapError::TypeLineNumberZero);
+        assert_eq!(error.code(), 152);
+    }
+
+    #[test]
+    fn type_absolute_path_new_relative_with_code_154() {
+        let error = AbsolutePath::new(PathBuf::from("relative/x.lcov")).unwrap_err();
+        assert_eq!(error, HeatmapError::TypePathNotAbsolute);
+        assert_eq!(error.code(), 154);
     }
 
     /// Command line: valid flags in any order produce a validated configuration.
     #[test]
-    fn cli_parses_valid_arguments() {
+    fn cli_parse_cli_arguments_accepts_valid_arguments() {
         let lcov_path = std::env::temp_dir().join("chm_test_input.lcov");
         let output_path = std::env::temp_dir().join("chm_test_out");
         let arguments = vec![
@@ -3351,41 +3367,31 @@ fn idle() {}\n";
         );
     }
 
-    /// Command line: missing value, unknown flag, and relative path are rejected.
     #[test]
-    fn cli_rejects_bad_arguments() {
-        let missing_value = vec![OsString::from("bin"), OsString::from("--lcov")];
-        assert_eq!(
-            parse_cli_arguments(missing_value.into_iter()).err(),
-            Some(HeatmapError::CliMissingFlagValue)
-        );
+    fn cli_parse_cli_arguments_missing_value_with_code_103() {
+        let error = cli_error(&["hix", "--lcov"]).unwrap();
+        assert_eq!(error, HeatmapError::CliMissingFlagValue);
+        assert_eq!(error.code(), 103);
+    }
 
-        let unknown = vec![
-            OsString::from("bin"),
-            OsString::from("--nope"),
-            OsString::from("x"),
-        ];
-        assert_eq!(
-            parse_cli_arguments(unknown.into_iter()).err(),
-            Some(HeatmapError::CliUnknownFlag)
-        );
+    #[test]
+    fn cli_parse_cli_arguments_unknown_flag_with_code_102() {
+        let error = cli_error(&["hix", "--nope", "x"]).unwrap();
+        assert_eq!(error, HeatmapError::CliUnknownFlag);
+        assert_eq!(error.code(), 102);
+    }
 
-        let relative = vec![
-            OsString::from("bin"),
-            OsString::from("--lcov"),
-            OsString::from("relative.lcov"),
-            OsString::from("--out-dir"),
-            std::env::temp_dir().into_os_string(),
-        ];
-        assert_eq!(
-            parse_cli_arguments(relative.into_iter()).err(),
-            Some(HeatmapError::TypePathNotAbsolute)
-        );
+    #[test]
+    fn cli_parse_cli_arguments_relative_path_with_code_154() {
+        let error =
+            cli_error(&["hix", "--lcov", "relative.lcov", "--out-dir", "/abs/out"]).unwrap();
+        assert_eq!(error, HeatmapError::TypePathNotAbsolute);
+        assert_eq!(error.code(), 154);
     }
 
     /// Retry policy is defined per code: only transient open errors retry.
     #[test]
-    fn retryability_is_per_code() {
+    fn err_is_retryable_only_transient_open_codes() {
         assert!(HeatmapError::LcovOpenTransient.is_retryable());
         assert!(!HeatmapError::LcovOpenNotFound.is_retryable());
         assert!(!HeatmapError::AnaCountOverflow.is_retryable());
@@ -3394,7 +3400,7 @@ fn idle() {}\n";
     /// End-to-end rendering: text report sections present; TSV has one header
     /// row plus one row per site (2 functions + 1 loop).
     #[test]
-    fn text_report_and_tsv_render() {
+    fn rpt_write_text_report_and_tsv_render() {
         let records = parse_sample();
         let (mut function_sites, _duplicate_function_name_count) =
             build_function_sites(&records).unwrap();
@@ -3443,7 +3449,7 @@ fn idle() {}\n";
     /// Co-count groups: two hot groups are found (2 functions; 1 function +
     /// 1 loop); identical counts below CO_COUNT_MIN_COUNT are ignored.
     #[test]
-    fn co_count_groups_detect_identical_hot_counts() {
+    fn rpt_write_co_count_groups_detects_identical_hot_counts() {
         let records = parse_sample();
         let function_sites = vec![
             make_site(292_014_254, 1),
@@ -3469,7 +3475,7 @@ fn idle() {}\n";
     /// the loop on the following line is found with the correct line number,
     /// count, and enclosing-function count.
     #[test]
-    fn overlong_source_line_does_not_skip_file_and_next_loop_is_found() {
+    fn src_scan_source_reader_overlong_line_keeps_file_and_finds_next_loop() {
         let records = parse_lcov_text(
             "SF:/abs/src/gen.rs\nFN:1,_ZN3gen4fill17h0E\nFNDA:5,_ZN3gen4fill17h0E\nDA:1,5\nDA:3,500\nend_of_record\n",
         );
@@ -3496,7 +3502,7 @@ fn idle() {}\n";
     /// newline, has already ended. Nothing may be discarded, otherwise the
     /// next line (the loop) would be destroyed and line numbers would shift.
     #[test]
-    fn line_one_byte_over_limit_does_not_swallow_next_line() {
+    fn src_read_source_line_one_byte_over_limit_keeps_next_line() {
         let records = parse_lcov_text(
             "SF:/abs/src/edge.rs\nFN:2,_ZN4edge1f17h0E\nFNDA:1,_ZN4edge1f17h0E\nDA:2,7\nend_of_record\n",
         );
@@ -3515,7 +3521,7 @@ fn idle() {}\n";
     /// (ending in `*`) and the discarded part (starting with `/`) is still
     /// seen as closed, so the loop after it is found.
     #[test]
-    fn block_comment_end_split_across_discard_boundary_is_seen() {
+    fn src_scan_source_reader_sees_comment_end_split_across_discard() {
         let records = parse_lcov_text(
             "SF:/abs/src/cmt.rs\nFN:1,_ZN3cmt1f17h0E\nFNDA:2,_ZN3cmt1f17h0E\nDA:4,9\nend_of_record\n",
         );
@@ -3535,7 +3541,7 @@ fn idle() {}\n";
     /// A loop header at the start of an over-long line is detected from the
     /// kept start of the line.
     #[test]
-    fn loop_header_at_start_of_overlong_line_is_detected() {
+    fn src_scan_source_reader_detects_loop_at_start_of_overlong_line() {
         let records = parse_lcov_text(
             "SF:/abs/src/big.rs\nFN:1,_ZN3big1g17h0E\nFNDA:3,_ZN3big1g17h0E\nDA:2,42\nend_of_record\n",
         );
@@ -3551,16 +3557,18 @@ fn idle() {}\n";
         assert_eq!(outcome.loop_sites[0].execution_count, 42);
     }
 
-    /// Discarding: respects the cap, stops right after the newline (the next
-    /// line stays readable), and detects `*/` including the carried `*`.
     #[test]
-    fn discard_rest_of_source_line_respects_cap_and_stops_at_newline() {
+    fn src_discard_rest_of_source_line_exceeds_cap_with_code_308() {
         let mut no_newline = Cursor::new(b"xxxxxxxxxx".to_vec());
-        assert_eq!(
-            discard_rest_of_source_line(&mut no_newline, false, 4).err(),
-            Some(HeatmapError::SrcLineExceedsSkipCap)
-        );
+        let error = discard_rest_of_source_line(&mut no_newline, false, 4).unwrap_err();
+        assert_eq!(error, HeatmapError::SrcLineExceedsSkipCap);
+        assert_eq!(error.code(), 308);
+    }
 
+    /// Discarding stops right after the newline (the next line stays
+    /// readable) and detects `*/`, including a `*` carried from the kept part.
+    #[test]
+    fn src_discard_rest_of_source_line_stops_at_newline_and_sees_comment_end() {
         let mut with_newline = Cursor::new(b"abc*/def\nNEXT\n".to_vec());
         assert!(discard_rest_of_source_line(&mut with_newline, false, 100).unwrap());
         let mut next_line: Vec<u8> = Vec::new();
@@ -3579,11 +3587,11 @@ fn idle() {}\n";
     /// The enum discriminant is the only place a code number may be written.
     /// Every message must obtain it with `HeatmapError::Variant.code()`.
     /// This test reads this module and `main.rs` (compiled in as text) and
-    /// fails if the marker "CHM-" is directly followed by a digit anywhere,
+    /// fails if the marker "HIX-" is directly followed by a digit anywhere,
     /// naming the file and line. Renumbering codes therefore cannot leave a
     /// stale number behind in any message.
     #[test]
-    fn source_contains_no_hard_coded_error_code_numbers() {
+    fn guard_source_contains_no_hard_coded_error_code_numbers() {
         let source_files: [(&str, &str); 2] = [
             (
                 "hix_heatmap_indices_for_compute.rs",
@@ -3591,7 +3599,7 @@ fn idle() {}\n";
             ),
             ("main.rs", include_str!("main.rs")),
         ];
-        let marker = "CHM-";
+        let marker = "HIX-";
         for (file_name, source_text) in source_files.iter() {
             for (line_index, line_text) in source_text.lines().enumerate() {
                 for (found_index, _) in line_text.match_indices(marker) {
@@ -3613,7 +3621,7 @@ fn idle() {}\n";
     /// step with those constants: changing a constant without updating the
     /// usage text fails here.
     #[test]
-    fn usage_text_matches_top_n_constants() {
+    fn guard_usage_text_matches_top_n_constants() {
         let range_text = format!("--top-n 1..{}", MAX_TOP_N);
         let default_text = format!("(default {})", DEFAULT_TOP_N);
         assert!(
@@ -3650,7 +3658,7 @@ fn idle() {}\n";
 
     /// A source path listed in two `SF:` records is counted once as a duplicate.
     #[test]
-    fn duplicate_source_paths_are_counted() {
+    fn ana_count_duplicate_source_paths_counts_repeats() {
         let records = parse_lcov_text(
             "SF:/abs/a.rs\nDA:1,1\nend_of_record\nSF:/abs/b.rs\nDA:1,1\nend_of_record\nSF:/abs/a.rs\nDA:2,1\nend_of_record\n",
         );
@@ -3661,7 +3669,7 @@ fn idle() {}\n";
     /// The cold-tail line derives its ceiling from the last concentration
     /// target (99 -> "<= 1%"), not from typed-in text.
     #[test]
-    fn cold_tail_line_uses_last_concentration_target() {
+    fn rpt_write_heat_kind_section_cold_tail_uses_last_target() {
         let records = parse_sample();
         let function_sites = vec![make_site(90, 1), make_site(9, 2), make_site(1, 3)];
         let report_text = render_text_report(&records, &function_sites, &[]);

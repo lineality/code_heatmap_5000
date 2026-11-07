@@ -430,13 +430,13 @@ This tool is not (currently) conceived of as being for cases where everything is
 3. For quad 4:4 (low,low) for which there is no need to give examples (though 
 one or two might be academically useful in terms of looking at the bottom N lowest of the low...) the low/low portion of the quadrant could contain some overall metrics such as what portion of function / loops are in that group, maybe what portion of time is used by that group (which might be an indicator of how big the gaps are (e.g. if 99.9% of functions and loops are in low, low, that's probably a good sign... maybe). (Note: maybe there should be a high-level quad for overall data for all four regions?)
 
-4. "You're a wizard, Heatmap!": Make a wizard_cli_module.rs, a Q&A bash-using module for (fedora) linux that can be called by main to semi-automate the overall process (including checking to see that things are installed). E.g. Q&A -> What is the path to the crate you want to test (required)? Is this default path to save the results-files ok (y/n)? [] Is this default path to save the report files ok (y/n)? [] etc. Store files in a standard run_data dir. (As the overall process grows, having a clear cli-wizard will be important for practical use, standardized use, and arguably repeat/audit/re-test use. (e.g. possibly having, saving and (re) running (sharing, etc) a wiz_config_{} file (whatever format). 
+4. "You're a wizard, Heatmap!": Make a wizard_cli_module.rs, a Q&A bash-using module for (fedora) linux that can be called by main to semi-automate the overall process (including checking to see that things are installed). E.g. Q&A -> What is the path to the crate you want to test (required)? Is this default path to save the results-files ok (y/n)? [] Is this default path to save the report files ok (y/n)? [] etc. Store files in a standard modeling_data dir. (As the overall process grows, having a clear cli-wizard will be important for practical use, standardized use, and arguably repeat/audit/re-test use. (e.g. possibly having, saving and (re) running (sharing, etc) a wiz_config_{} file (whatever format). 
 
 5. Time/duration of test probably should be included...
 
 6. Choice of and use of perf over samply should be fully explained/documented.
 
-7. No Yard Sale: All run/modeling files should be placed in / accessed from some standard dir such as /run_data/ or /modeling_data/ that is safely git-ignored: preferred 'modeling_data' or 'modeling_files' or just 'modeling'
+7. No Yard Sale: All run/modeling files should be placed in / accessed from some standard dir such as /modeling_data/ or /modeling_data/ that is safely git-ignored: preferred 'modeling_data' or 'modeling_files' or just 'modeling'
 
 
 # Not in MVP-1:

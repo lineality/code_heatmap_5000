@@ -1,7 +1,7 @@
 # HIX Heatmap Indices for Compute (Project Outline)
 *"Somebody wakeup HIX."*
 
-### Liebig-Barrel, Physical, Data, Code, Compute, Time, Memory Riparian Modeling
+### Liebig-Barrel, Physical, Data, Time, Memory, Behavior, Code, Compilation, Compute, Riparian Modeling
 
 hix_heatmap_indices_for_compute.rs
 hix.exe
@@ -60,7 +60,7 @@ In this context, this idea is to (baby steps from crude starting point) explore 
 The 'indices' aspect of this, beyond providing various raw-data for human interpretation, is somewhat aspirational but perhaps can be achieved by disambiguating different areas for indices where what they represent can be notably different.
 
 
-Raw-Type Indices:
+#### Raw-Type Indices:
 1. Count-Heat-Index Per Loop & Function
 2. Time-Heat-Index Per Loop & Function
 3. Some Count Heat Function(s) Per Loop & Function
@@ -69,11 +69,69 @@ Raw-Type Indices:
 
 
 
-Interpretive Indices: Good vs. Bad Indices
+### Interpretive Indices: Good vs. Bad Indices
 A critical distinction between types of indices is the basic distinction between saying that a loop or function is prominent and should be vs. saying that a given region is prominent and it should not be, indicating that something should be changed. This may be similar to saying highly-represented in a neutral way, vs. something being over-represented in a pejorative way. 
 
+There may also be ~intermediary levels of index and evaluation. (Any of these  may be in highly specific areas with specific data, measures, and tests.) e.g.
+
+1. raw counts and times (possibly together, possibly sometimes necessarily not co-recorded).
+
+2. Areas of interest (e.g. 'hot loop' that should be scrutinized but might already be as good as it gets).
+
+3. Possible Warning Signs of possibly-bad measureables, but still needs manual inspection. 
+
+4. Highly likely bad-behavior (still needs inspection, but unlikely to be ok most of the time (e.g. might be bad but least-worst and unavoidable).
+
+5. Measurably-Bad: Definitely something is wrong.
+
+6. Common-Issue & Known common solution-improvements (still open to inspection and decision)
+
+7. Solutions so clear to problems so clear that the solutions can be (if not ideally) fully automated.
+
+(These 'levels' can also be used, in some cases, to identify and organize report sections.)
 
 
+### Contextual Tradeoff Priorities for Optimization
+
+In the short term for planning-organization, in the long-term for specific functionality, a user should set down what their Contextual Tradeoff Priorities for Optimization are.
+
+Three dimensions for planning/specifying contexts and priorities:
+- 1. Policy x 
+- 2. Priority-Focus x 
+- 3. Code-Region-Type 
+
+1. Policy: 
+- Neutral Policy
+- Balance (or Balance with {other area([s])})
+- Exclude / Must not use at all 
+- Max(imize) / Use as Cheapest 
+- Exclusive / Use Exclusively 
+- Min(imize) / Reduce-Footprint
+- Minimized in Hot Regions
+
+
+Priority-Focus Areas:
+- Security / Privacy
+- Resilience, Redundancy, & (Edge) Case Handling
+- Stack Memory
+- Heap Memory
+- Network-Use
+- CPU Core Use
+- Disk I/O Use
+- GPU Use
+- Scalability
+- Boot-Time
+- Shutdown-Time
+- Speed / Action-Response-Time
+- Database-ACID Time
+- Cross-Platform-Ness
+- Edge-Embedded-Ness
+
+
+### Code-Region-Type:
+- Hot, 
+- Gray-Oatmeal, 
+- Cold
 
 
 0. Dashboard, Report-Organization: Useful presentation and exploration of data. E.g. Specific types and sub-types of head and tracing back what/where was measured how. (terminal/TUI, file(e.g. json), HTML, PDF)
@@ -109,7 +167,8 @@ These parts may also frame out MVP steps, with some Dashboard/Report (terminal/T
 - MVP 1.3: Meta-Data Calculations
 - MVP 1.4: Tertiary
 - MVP 1.5: Supplemental
-
+- MVP 1.6: Specific Implementation-Area Analysis
+- MVP 1.7: Region Zoom-In Data-collection & Analysis
 
 It is somewhat open-ended how to use the quad-report, in terms of the overall scope of making a Liebig's Barrel model of how the code runs. Are there big gaps or only small ones? How many gaps are there? Is the barrel a normal barrel with microscopic gaps, or a ravaged-skeleton with vastly different cooper-lengths? Could/should this be scored? Is this unavoidable or preventable? etc.
  
@@ -178,9 +237,43 @@ https://github.com/lineality/ff_file_manager_minimal_rust
 
 ## Overall Workflow:
 
-For design we will consider two general approaches, of which a hybrid may (or may not) eventually be used. 
-1. Using Rust compile tools to inspect without modifying code.
+### Scoping Sources & Targets
+
+This is a larger heterogenous problem space with no single navigation path or context, but we can and will start somewhere.
+
+The question of what data are being targeted and what the options are for getting those data will also be factors in approaches taken. 
+
+For example:
+
+1. Getting and analyzing basic count and time data make sense as a first-scope with more elaborate data and analysis being later scope.
+
+2. The differences between 1. perf 2. Samply, also notable. While linux only, perf seems to align better with the scope of this project, while Samply seems to suffer from the 'fast fashion software curse': Easy! Everywhere! Convenience! Trendy! Don't get left behind! Believe! which are usually red flags; as I understand it Samply closely fits the very standard profile of 'Start fast, move fast, and hit brick wall fast' (and then redesign from square one without that fatal dependency flaw).
+
+If there are notable Samply deep-features (not conveniences) then possible future scope may be optional Samply analysis. E.g. samply use of on-the-fly analysis and 'framehop' (if those are correct to mention) might be used or their concepts borrowed.
+
+On-The-Fly-perf may be a needed partner-module that goes with HIX. On the other hand, being able to record an optional audit-record (however large) may also be useful functionality. 
+
+3. Manual inspection (e.g. adding counting/timing monitoring to code) is probably not needed or desirable for initial overall count-time scope, though it may be useful for specific-region-zoom-in later. LLVM, linux-perf, and cargo, may provide best-matching tools that align with 'first-scan' starting features.
+
+4. Other tools like rad-debugger features should be examined.
+
+
+#### Future Features
+
+Future functionality goals are also part of the puzzle, for example where first-features are expected to lead-bridge to those (or not). 
+
+Trying to dig or peer in some way to some depth into the 'implimentation' areas mentioned above and explore what situations and possible improvement directions are is the overall scope-goal.
+
+While using existing tools may make the most sense or be unavoidable, the ethos of the type of software the HIX is built with values 'roll your own' 'in-house' zero-dependency type tools. This might be unrealistic or infeasible, but long-term deeper features and maintainability usually interdigitate with native in-house implementations. E.g. one cannot very well compare the resulting binaries and memory-count-time behaviors across different OS, architectures, and compilers, and build-settings, if LLVM is built in as the hidden-magic-kludge. The initial focus here is on Rust, but the larger problem space extends across c-family, fil-c, zig, odin, embedded devices, and may get into the 'Proto-Type' set of puzzles ( https://github.com/lineality/operations_memory_state_manager ). Again, naive-ambission may be impractical, and the target-scope is not (and should not be) all of the real larger problem space, but knowing what that problem-space is is still required due-dilligence. 
+
+
+### Two Approaches Compared
+
+In a context of First-Scope-Design we will consider two general approaches, of which a hybrid may (or may not) eventually be used. 
+1. Using Linux, LLVM & Rust compile tools to inspect without modifying code.
 2. Adding measurement-inspection code to a repo.
+
+
 
 
 ## Naive Approach 1:
@@ -409,6 +502,30 @@ This tool is not (currently) conceived of as being for cases where everything is
 14. Policy: While having no third-party dependencies is ideal, there is a good chance that well-tested utilities exist (one would hope!) and can be used or cover all or or some of this sketch of scope. It may be possible to use no 3rd party rust crates (or so up to a point).
 
 
+# File Structure for Use
+
+Test / run / modeling data should be saved to and accessed from a standardized and clearly named /modeling_data/ directory (which is safely git-ignored)
+
+For specific data-sets, test-sets, runs, etc. within /modeling_data/ :
+
+The sub-folders should (for organization) have unique names. HIX should give you a refuse & error-warning if you try to re-use an existing dir, e.g. potentially overwriting existing files.
+
+The wizard can also help manage this for the cargo, llvm, perf etc. steps that also should mind file-paths.
+
+"Run" & "analysis" names and numbers should assume they exist with past and future "runs" (so 'new!' 'shiny!' 'live in the moment!' are not good names) and should not reuse colliding names. Each name can tersely mention what it analyses: 
+
+- run_001_lines_editor_cut_paste
+- run_002_pumpkin_world_spawn_only
+- analysis_001_starting_baseline
+- analysis_004_after_fix_1
+
+
+e.g.
+```
+run_NNN_<scenario> 
+analysis_NNN_<purpose> 
+```
+
 
 # MVP-1 Scope:
 
@@ -420,13 +537,15 @@ This tool is not (currently) conceived of as being for cases where everything is
 3. For quad 4:4 (low,low) for which there is no need to give examples (though 
 one or two might be academically useful in terms of looking at the bottom N lowest of the low...) the low/low portion of the quadrant could contain some overall metrics such as what portion of function / loops are in that group, maybe what portion of time is used by that group (which might be an indicator of how big the gaps are (e.g. if 99.9% of functions and loops are in low, low, that's probably a good sign... maybe). (Note: maybe there should be a high-level quad for overall data for all four regions?)
 
-4. "You're a wizard, Heatmap!": Make a wizard_cli_module.rs, a Q&A bash-using module for (fedora) linux that can be called by main to semi-automate the overall process (including checking to see that things are installed). E.g. Q&A -> What is the path to the crate you want to test (required)? Is this default path to save the results-files ok (y/n)? [] Is this default path to save the report files ok (y/n)? [] etc. Store files in a standard run_data dir. (As the overall process grows, having a clear cli-wizard will be important for practical use, standardized use, and arguably repeat/audit/re-test use. (e.g. possibly having, saving and (re) running (sharing, etc) a wiz_config_{} file (whatever format). 
+4. "You're a wizard, Heatmap!": Make a wizard_cli_module.rs, a Q&A bash-using module for (fedora) linux that can be called by main to semi-automate the overall process (including checking to see that things are installed). E.g. Q&A -> What is the path to the crate you want to test (required)? Is this default path to save the results-files ok (y/n)? [] Is this default path to save the report files ok (y/n)? [] etc. Store files in a standard modeling_data dir. (As the overall process grows, having a clear cli-wizard will be important for practical use, standardized use, and arguably repeat/audit/re-test use. (e.g. possibly having, saving and (re) running (sharing, etc) a wiz_config_{} file (whatever format). 
 
 5. Time/duration of test probably should be included...
 
 6. Choice of and use of perf over samply should be fully explained/documented.
 
-7. No Yard Sale: All run/modeling files should be placed in / accessed from some standard dir such as /run_data/ or /modeling_data/ that is safely git-ignored: preferred 'modeling_data' or 'modeling_files' or just 'modeling'
+7. No Yard Sale: All run/modeling files should be placed in / accessed from some standard dir such /modeling_data/ that is safely git-ignored
+
+8. Ideally any data-visualization in reports does not use any 3rd party libraries, simple ascii version is highly practical (and terminal friendly).
 
 
 # Not in MVP-1:
